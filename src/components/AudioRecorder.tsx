@@ -7,19 +7,30 @@ import {
   UploadCloud, 
   FileAudio, 
   Bookmark, 
-  CheckCircle2, 
-  Sparkles,
-  Sliders,
-  Volume2
+  Volume2,
+  AlertCircle,
+  Sparkles
 } from 'lucide-react';
-import { Lecture, TranscriptSegment, AppSettings } from '../types';
-import { SAMPLE_LECTURES } from '../data/sampleLectures';
+import { Lecture, TranscriptSegment, AppSettings, ActionItem, LatexFormula } from '../types';
 
 interface AudioRecorderProps {
   settings: AppSettings;
   onLectureCreated: (lecture: Lecture) => void;
   onNavigateToViewer: () => void;
 }
+
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(',')[1] || '';
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
 
 export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   settings,
@@ -31,42 +42,44 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   
   // Recording states: 'idle' | 'recording' | 'paused' | 'processing'
   const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused' | 'processing'>('idle');
+  const [processingStatus, setProcessingStatus] = useState<string>('Идет распознавание речи и формирование конспекта...');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [bookmarks, setBookmarks] = useState<{ time: number; note: string }[]>([]);
   const [currentDecibels, setCurrentDecibels] = useState(-32);
   
+  // Real-time transcribed text (from Web Speech API when available)
+  const [liveTranscript, setLiveTranscript] = useState<string>('');
+  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
+  const [micError, setMicError] = useState<string | null>(null);
+  
   // File upload state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileAudioUrl, setFileAudioUrl] = useState<string | null>(null);
-  const [noiseProfile, setNoiseProfile] = useState<'quiet' | 'moderate' | 'noisy' | 'echo'>('moderate');
-  const [lectureSubject, setLectureSubject] = useState('Высшая математика');
-  const [lectureTitle, setLectureTitle] = useState('Дифференциальные уравнения и формулы Тейлора');
-  const [lecturerName, setLecturerName] = useState('Проф. Соколов В. П.');
+  const [lectureSubject, setLectureSubject] = useState('');
+  const [lectureTitle, setLectureTitle] = useState('');
+  const [lecturerName, setLecturerName] = useState('');
 
-  // Pipeline simulation stages
-  const [pipelineStage, setPipelineStage] = useState<number>(0);
-  const pipelineSteps = [
-    { title: 'Очистка звука', desc: 'Удаление шума аудитории и пауз лектора' },
-    { title: 'Распознавание речи', desc: 'Преобразование голоса в текст' },
-    { title: 'Поиск задач', desc: 'Автоматический поиск дедлайнов и домашних заданий' },
-    { title: 'Формулы и конспект', desc: 'Форматирование математических выражений' }
-  ];
-
-  // Canvas visualizer refs
+  // Audio recording refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timerIntervalRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recognitionRef = useRef<any>(null);
 
-  // Stop timer on unmount
+  // Stop everything on unmount
   useEffect(() => {
     return () => {
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch {}
       }
       if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
         audioContextRef.current.close().catch(() => {});
@@ -83,40 +96,127 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
   // Start live microphone recording
   const startRecording = async () => {
+    setMicError(null);
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Ваш браузер или текущее окружение не поддерживает запись аудио через MediaDevices.');
+      }
+
+      // 1. Request user microphone
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
       setRecordingState('recording');
       setElapsedSeconds(0);
       setBookmarks([]);
+      setLiveTranscript('');
+      setTranscriptSegments([]);
+      audioChunksRef.current = [];
 
-      // Start timer
+      // 2. Start UI Timer
       timerIntervalRef.current = window.setInterval(() => {
         setElapsedSeconds(prev => prev + 1);
       }, 1000);
 
-      // Attempt to access user microphone
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
-      
+      // 3. Audio Context & Waveform Analyser
       const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
       audioContextRef.current = audioCtx;
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 128;
       analyserRef.current = analyser;
 
-      if (stream) {
-        mediaStreamRef.current = stream;
-        const source = audioCtx.createMediaStreamSource(stream);
-        source.connect(analyser);
-      }
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      drawWaveform();
 
-      // Draw real or simulated waveform
-      drawWaveform(!!stream);
-    } catch {
-      // Fallback to simulated audio recording
-      drawWaveform(false);
+      // 4. Real MediaRecorder to capture audio
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : MediaRecorder.isTypeSupported('audio/mp4')
+        ? 'audio/mp4'
+        : '';
+
+      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+      mediaRecorder.start(250);
+
+      // 5. Web Speech API (runs in background for live typing feedback if supported by browser)
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        try {
+          const recognition = new SpeechRecognition();
+          recognitionRef.current = recognition;
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.lang = 'ru-RU';
+
+          let lastSegmentStart = 0;
+
+          recognition.onresult = (event: any) => {
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+              const transcriptText = event.results[i][0].transcript;
+              if (event.results[i].isFinal) {
+                const textClean = transcriptText.trim();
+                if (textClean) {
+                  setTranscriptSegments(prev => [
+                    ...prev,
+                    {
+                      id: `seg-${Date.now()}-${prev.length}`,
+                      startTime: lastSegmentStart,
+                      endTime: elapsedSeconds,
+                      speaker: 'Лектор',
+                      text: textClean,
+                      bookmarked: false
+                    }
+                  ]);
+                  lastSegmentStart = elapsedSeconds;
+                  setLiveTranscript(prev => (prev ? prev + ' ' : '') + textClean);
+                }
+              }
+            }
+          };
+
+          recognition.onerror = (e: any) => {
+            console.warn('Browser speech recognition info:', e.error);
+          };
+
+          recognition.onend = () => {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+              try { recognition.start(); } catch {}
+            }
+          };
+
+          recognition.start();
+        } catch (err) {
+          console.warn('SpeechRecognition start failed (will use backend AI transcription):', err);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Mic access error:', err);
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = null;
+      }
+      setRecordingState('idle');
+
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || err.message?.toLowerCase().includes('permission denied') || err.message?.toLowerCase().includes('not allowed')) {
+        setMicError('Браузер заблокировал доступ к микрофону. Нажмите на значок замка или микрофона в строке адреса браузера и выберите «Разрешить».');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setMicError('Микрофон не обнаружен на вашем устройстве. Подключите гарнитуру или микрофон.');
+      } else {
+        setMicError(err.message || 'Не удалось получить доступ к микрофону. Пожалуйста, разрешите доступ в настройках браузера.');
+      }
     }
   };
 
-  const drawWaveform = (hasRealMic: boolean) => {
+  const drawWaveform = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -131,16 +231,11 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
       ctx.clearRect(0, 0, width, height);
 
-      if (analyserRef.current && hasRealMic) {
+      if (analyserRef.current) {
         analyserRef.current.getByteFrequencyData(dataArray);
-      } else {
-        // Generate dynamic organic waves simulating student lecture speech
-        for (let i = 0; i < 64; i++) {
-          dataArray[i] = Math.max(10, Math.floor(60 + Math.sin(Date.now() / 200 + i * 0.2) * 45 + Math.random() * 30));
-        }
       }
 
-      // Compute approximate dB
+      // Compute dB
       let sum = 0;
       for (let i = 0; i < dataArray.length; i++) {
         sum += dataArray[i];
@@ -149,17 +244,17 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       const db = Math.round((avg / 255) * 60 - 55);
       setCurrentDecibels(db);
 
-      // Draw frequency bars
+      // Draw bars
       const barWidth = (width / 48) - 2;
       let x = 0;
 
       for (let i = 0; i < 48; i++) {
-        const val = dataArray[i] || 15;
-        const barHeight = Math.max(4, (val / 255) * (height - 12));
+        const val = dataArray[i] || 4;
+        const barHeight = Math.max(3, (val / 255) * (height - 12));
 
         const gradient = ctx.createLinearGradient(0, height, 0, height - barHeight);
-        gradient.addColorStop(0, '#4338ca'); // indigo-700
-        gradient.addColorStop(1, '#818cf8'); // indigo-400
+        gradient.addColorStop(0, '#4338ca');
+        gradient.addColorStop(1, '#818cf8');
 
         ctx.fillStyle = gradient;
         ctx.beginPath();
@@ -178,6 +273,12 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
     }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
     setRecordingState('paused');
   };
 
@@ -186,127 +287,190 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     timerIntervalRef.current = window.setInterval(() => {
       setElapsedSeconds(prev => prev + 1);
     }, 1000);
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+      mediaRecorderRef.current.resume();
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.start(); } catch {}
+    }
   };
 
   const addBookmark = () => {
-    const bookmarkTitle = prompt('Заметка к таймкоду:', 'Важный тезис / Формула на доске');
+    const bookmarkTitle = prompt('Заметка к текущему моменту:', 'Важный тезис');
     if (bookmarkTitle) {
       setBookmarks(prev => [...prev, { time: elapsedSeconds, note: bookmarkTitle }]);
     }
   };
 
-  // Stop recording and process
-  const finishAndProcess = () => {
+  // Stop recording and perform REAL AI speech recognition
+  const finishAndProcess = async () => {
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    
+    // Stop recognition
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+
+    // Stop MediaRecorder
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+
+    // Stop tracks
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(track => track.stop());
     }
 
     setRecordingState('processing');
-    setPipelineStage(0);
+    setProcessingStatus('Нейросетевое распознавание речи и выделение дедлайнов...');
 
-    // Simulate the 4 local pipeline steps
-    const stepInterval = setInterval(() => {
-      setPipelineStage(prev => {
-        if (prev < 3) {
-          return prev + 1;
+    // Small delay to ensure all chunks are flushed
+    await new Promise(r => setTimeout(r, 200));
+
+    let recordedAudioUrl: string | undefined = undefined;
+    let base64Audio = '';
+    const audioBlob = audioChunksRef.current.length > 0 
+      ? new Blob(audioChunksRef.current, { type: audioChunksRef.current[0].type || 'audio/webm' }) 
+      : null;
+
+    if (audioBlob && audioBlob.size > 0) {
+      recordedAudioUrl = URL.createObjectURL(audioBlob);
+      try {
+        base64Audio = await blobToBase64(audioBlob);
+      } catch (e) {
+        console.warn('Blob to base64 conversion failed:', e);
+      }
+    }
+
+    let aiResult: any = null;
+
+    // Call backend /api/transcribe with the real audio
+    if (base64Audio) {
+      try {
+        const response = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64Audio,
+            mimeType: audioBlob?.type || 'audio/webm',
+            title: lectureTitle.trim(),
+            subject: lectureSubject.trim(),
+          }),
+        });
+
+        if (response.ok) {
+          aiResult = await response.json();
         } else {
-          clearInterval(stepInterval);
-          // Complete pipeline
-          setTimeout(() => {
-            const newLecture: Lecture = {
-              id: `lec-live-${Date.now()}`,
-              title: lectureTitle || 'Запись университетской лекции',
-              subject: lectureSubject || 'Высшая математика',
-              lecturer: lecturerName || 'Преподаватель кафедры',
-              date: new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }),
-              durationSeconds: Math.max(elapsedSeconds, 45),
-              audioFileName: selectedFile ? selectedFile.name : 'live_mic_recording.wav',
-              tags: [lectureSubject, 'Офлайн ASR', 'PySide6'],
-              noiseLevel: noiseProfile,
-              modelUsed: `${settings.asrModel} + ${settings.llmModel}`,
-              quantization: `${settings.asrQuantization.toUpperCase()} + ${settings.llmQuantization.toUpperCase()}`,
-              transcript: [
-                {
-                  id: 'live-seg-1',
-                  startTime: 0,
-                  endTime: Math.round(Math.max(elapsedSeconds * 0.3, 15)),
-                  speaker: 'Лектор',
-                  text: 'Коллеги, начинаем разбор ключевых уравнений. Обратите внимание на структуру доказательства.',
-                  bookmarked: bookmarks.length > 0
-                },
-                {
-                  id: 'live-seg-2',
-                  startTime: Math.round(Math.max(elapsedSeconds * 0.35, 18)),
-                  endTime: Math.round(Math.max(elapsedSeconds, 45)),
-                  speaker: 'Лектор',
-                  text: 'К следующему занятию обязательно подготовить решение индивидуальных задач № 12-18 и выучить формулы.',
-                  bookmarked: true
-                }
-              ],
-              summaryMarkdown: `## Конспект: ${lectureTitle}
-
-### 1. Основные положения
-- Рассмотрен метод решения дифференциальных уравнений и рядов
-- Выделены условия сходимости и граничные условия задачи Коши
-
-### 2. Ключевые формулы
-$$\\int_{a}^{b} f(x) dx = F(b) - F(a)$$
-$$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
-
-### 3. Рекомендации к семинару
-- Проработать разложение в окрестности нуля по формуле Маклорена.`,
-              actionItems: [
-                {
-                  id: `task-live-1`,
-                  task: 'Решить домашнее задание к следующему занятию (задачи 12-18)',
-                  deadline: 'Пятница 23:59',
-                  dateISO: new Date(Date.now() + 5 * 24 * 3600 * 1000).toISOString().split('T')[0],
-                  type: 'homework',
-                  completed: false,
-                  priority: 'high'
-                },
-                {
-                  id: `task-live-2`,
-                  task: 'Выучить базовые формулы и доказательство теоремы',
-                  deadline: 'Следующий вторник',
-                  dateISO: new Date(Date.now() + 8 * 24 * 3600 * 1000).toISOString().split('T')[0],
-                  type: 'exam',
-                  completed: false,
-                  priority: 'medium'
-                }
-              ],
-              latexFormulas: [
-                {
-                  id: 'live-f-1',
-                  title: 'Формула Ньютона-Лейбница',
-                  latex: '\\int_{a}^{b} f(x) dx = F(b) - F(a)',
-                  context: 'Вычисление определенного интеграла через первообразную'
-                },
-                {
-                  id: 'live-f-2',
-                  title: 'Фундаментальная система решений',
-                  latex: 'y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}',
-                  context: 'Базис решений для различных корней'
-                }
-              ],
-              keyDefinitions: [
-                {
-                  term: 'Задача Коши',
-                  definition: 'Нахождение решения дифференциального уравнения, удовлетворяющего начальным условиям y(x₀) = y₀.'
-                }
-              ]
-            };
-
-            onLectureCreated(newLecture);
-            setRecordingState('idle');
-            onNavigateToViewer();
-          }, 800);
-          return prev;
+          console.warn('API transcribe status not ok:', response.status);
         }
-      });
-    }, 1100);
+      } catch (err) {
+        console.warn('Failed to contact transcription backend:', err);
+      }
+    }
+
+    const finalTitle = lectureTitle.trim() || 
+      (aiResult?.summaryMarkdown?.match(/^#+\s*(.+)$/m)?.[1]) || 
+      'Запись лекции';
+    const finalSubject = lectureSubject.trim() || 'Учебное занятие';
+    const finalLecturer = lecturerName.trim() || 'Преподаватель';
+
+    // Real text from AI or fallback
+    let finalText = '';
+    let markdownNotes = '';
+    let finalActionItems: ActionItem[] = [];
+    let finalLatexFormulas: LatexFormula[] = [];
+    let finalSegments: TranscriptSegment[] = [];
+
+    if (aiResult && (aiResult.fullText || aiResult.summaryMarkdown)) {
+      finalText = aiResult.fullText || aiResult.summaryMarkdown || '';
+      markdownNotes = aiResult.summaryMarkdown || `## ${finalTitle}\n\n${finalText}`;
+      
+      // Parse tasks
+      if (Array.isArray(aiResult.actionItems) && aiResult.actionItems.length > 0) {
+        finalActionItems = aiResult.actionItems.map((item: any, idx: number) => ({
+          id: `task-ai-${Date.now()}-${idx}`,
+          task: item.task || 'Задание',
+          deadline: item.deadline || 'В ближайшее время',
+          dateISO: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().split('T')[0],
+          type: 'homework',
+          completed: false,
+          priority: item.priority === 'high' ? 'high' : 'medium'
+        }));
+      }
+
+      // Parse formulas
+      if (Array.isArray(aiResult.latexFormulas)) {
+        finalLatexFormulas = aiResult.latexFormulas.map((f: any, idx: number) => ({
+          id: `formula-ai-${Date.now()}-${idx}`,
+          title: f.title || 'Формула из лекции',
+          latex: f.latex || 'E = mc^2',
+          context: f.context || 'Упомянуто в речи'
+        }));
+      }
+
+      // Parse segments
+      if (Array.isArray(aiResult.segments) && aiResult.segments.length > 0) {
+        finalSegments = aiResult.segments.map((s: any, idx: number) => ({
+          id: `seg-${Date.now()}-${idx}`,
+          startTime: s.startTime || 0,
+          endTime: s.endTime || elapsedSeconds,
+          speaker: s.speaker || 'Лектор',
+          text: s.text || '',
+          bookmarked: false
+        }));
+      }
+    }
+
+    // Fallback if AI didn't return text (e.g. mic was completely silent)
+    if (!finalText) {
+      finalText = liveTranscript.trim() || 
+        transcriptSegments.map(s => s.text).join(' ').trim() ||
+        'Аудиозапись сохранена. В записи не было различимой речи либо микрофон был выключен.';
+      
+      markdownNotes = `## ${finalTitle}\n\n`;
+      markdownNotes += `**Предмет:** ${finalSubject}  \n`;
+      markdownNotes += `**Преподаватель:** ${finalLecturer}  \n`;
+      markdownNotes += `**Дата:** ${new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}  \n\n`;
+      markdownNotes += `---\n\n`;
+      markdownNotes += `### Стенограмма записи\n\n${finalText}\n`;
+    }
+
+    if (finalSegments.length === 0) {
+      finalSegments = [{
+        id: `seg-${Date.now()}`,
+        startTime: 0,
+        endTime: Math.max(elapsedSeconds, 1),
+        speaker: 'Лектор',
+        text: finalText,
+        bookmarked: false
+      }];
+    }
+
+    const newLecture: Lecture = {
+      id: `lec-${Date.now()}`,
+      title: finalTitle,
+      subject: finalSubject,
+      lecturer: finalLecturer,
+      date: new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }),
+      durationSeconds: Math.max(elapsedSeconds, 1),
+      audioFileName: recordedAudioUrl ? 'mic_recording.webm' : undefined,
+      tags: [finalSubject],
+      noiseLevel: 'moderate',
+      modelUsed: 'Нейросеть распознавания речи',
+      quantization: 'Текст',
+      transcript: finalSegments,
+      summaryMarkdown: markdownNotes,
+      actionItems: finalActionItems,
+      latexFormulas: finalLatexFormulas,
+      keyDefinitions: []
+    };
+
+    onLectureCreated(newLecture);
+    setRecordingState('idle');
+    onNavigateToViewer();
   };
 
   // Handle file drop / select
@@ -319,13 +483,115 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
     }
   };
 
-  // Load preset sample
-  const loadPresetLecture = (index: number) => {
-    const sample = SAMPLE_LECTURES[index];
-    if (sample) {
-      onLectureCreated(sample);
-      onNavigateToViewer();
+  // Process uploaded audio file with REAL speech recognition
+  const processUploadedAudio = async () => {
+    if (!selectedFile) return;
+
+    setRecordingState('processing');
+    setProcessingStatus(`Нейросетевая расшифровка аудиофайла "${selectedFile.name}"...`);
+
+    let base64Audio = '';
+    try {
+      base64Audio = await blobToBase64(selectedFile);
+    } catch (e) {
+      console.warn('File to base64 failed:', e);
     }
+
+    const title = lectureTitle.trim() || selectedFile.name.replace(/\.[^/.]+$/, '');
+    const subject = lectureSubject.trim() || 'Аудиозапись';
+    const lecturer = lecturerName.trim() || 'Преподаватель';
+
+    let aiResult: any = null;
+    if (base64Audio) {
+      try {
+        const response = await fetch('/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64Audio,
+            mimeType: selectedFile.type || 'audio/mp3',
+            title,
+            subject,
+          }),
+        });
+
+        if (response.ok) {
+          aiResult = await response.json();
+        }
+      } catch (err) {
+        console.warn('Failed to transcribe file via API:', err);
+      }
+    }
+
+    let finalText = aiResult?.fullText || `Аудиофайл "${selectedFile.name}" сохранен.`;
+    let markdownNotes = aiResult?.summaryMarkdown || `## ${title}\n\n*Файл: ${selectedFile.name}*\n\n---\n\n${finalText}`;
+    
+    let finalTasks: ActionItem[] = [];
+    if (Array.isArray(aiResult?.actionItems) && aiResult.actionItems.length > 0) {
+      finalTasks = aiResult.actionItems.map((item: any, idx: number) => ({
+        id: `task-file-${Date.now()}-${idx}`,
+        task: item.task || 'Задание',
+        deadline: item.deadline || 'По графику курса',
+        dateISO: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().split('T')[0],
+        type: 'homework',
+        completed: false,
+        priority: item.priority === 'high' ? 'high' : 'medium'
+      }));
+    }
+
+    let finalFormulas: LatexFormula[] = [];
+    if (Array.isArray(aiResult?.latexFormulas)) {
+      finalFormulas = aiResult.latexFormulas.map((f: any, idx: number) => ({
+        id: `formula-file-${Date.now()}-${idx}`,
+        title: f.title || 'Формула',
+        latex: f.latex || '',
+        context: f.context || ''
+      }));
+    }
+
+    let finalSegments: TranscriptSegment[] = [];
+    if (Array.isArray(aiResult?.segments) && aiResult.segments.length > 0) {
+      finalSegments = aiResult.segments.map((s: any, idx: number) => ({
+        id: `seg-f-${Date.now()}-${idx}`,
+        startTime: s.startTime || 0,
+        endTime: s.endTime || 60,
+        speaker: s.speaker || 'Лектор',
+        text: s.text || '',
+        bookmarked: false
+      }));
+    } else {
+      finalSegments = [{
+        id: `seg-file-${Date.now()}`,
+        startTime: 0,
+        endTime: 60,
+        speaker: 'Лектор',
+        text: finalText,
+        bookmarked: false
+      }];
+    }
+
+    const newLecture: Lecture = {
+      id: `lec-${Date.now()}`,
+      title,
+      subject,
+      lecturer,
+      date: new Date().toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }),
+      durationSeconds: 1800,
+      audioFileName: selectedFile.name,
+      tags: [subject],
+      noiseLevel: 'moderate',
+      modelUsed: 'Нейросеть распознавания речи',
+      quantization: 'Текст',
+      transcript: finalSegments,
+      summaryMarkdown: markdownNotes,
+      actionItems: finalTasks,
+      latexFormulas: finalFormulas,
+      keyDefinitions: []
+    };
+
+    onLectureCreated(newLecture);
+    setRecordingState('idle');
+    onNavigateToViewer();
   };
 
   return (
@@ -336,10 +602,10 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-neutral-800">
           <div>
             <h1 className="text-xl font-bold text-white tracking-tight">
-              Студия записи и транскрибации
+              Запись лекции
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
-              Локальная обработка речи с выделением задач, дедлайнов и LaTeX формул
+              Запись с микрофона в реальном времени или загрузка аудиофайла
             </p>
           </div>
 
@@ -353,8 +619,8 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                   : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
-              <Mic className="w-3.5 h-3.5 text-indigo-400" />
-              Прямая запись с микрофона
+              <Mic className="w-3.5 h-3.5 text-rose-400" />
+              Микрофон
             </button>
             <button
               onClick={() => setMode('file')}
@@ -365,70 +631,84 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
               }`}
             >
               <UploadCloud className="w-3.5 h-3.5 text-indigo-400" />
-              Загрузка аудиофайла
+              Аудиофайл
             </button>
           </div>
         </div>
 
-        {/* Processing State Overlay / Panel */}
+        {/* Processing State with Live Spinner */}
         {recordingState === 'processing' ? (
-          <div className="p-8 rounded-xl bg-neutral-900 border border-neutral-800 text-center space-y-6">
-            <div className="w-14 h-14 mx-auto rounded-full bg-indigo-950/60 border border-indigo-700/60 flex items-center justify-center text-indigo-400 animate-pulse">
+          <div className="p-12 rounded-xl bg-neutral-900 border border-neutral-800 text-center space-y-4">
+            <div className="w-14 h-14 mx-auto rounded-full bg-indigo-950 border border-indigo-700/80 flex items-center justify-center text-indigo-400 animate-pulse">
               <Sparkles className="w-7 h-7" />
             </div>
 
             <div>
-              <h2 className="text-lg font-bold text-white">
-                Обработка аудиозаписи...
+              <h2 className="text-base font-bold text-white">
+                {processingStatus}
               </h2>
               <p className="text-xs text-neutral-400 mt-1">
-                Распознавание речи, извлечение задач и форматирование конспекта
+                Нейросеть слушает вашу аудиозапись, переводит речь в текст, формулирует конспект и выделяет дедлайны
               </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-left">
-              {pipelineSteps.map((step, idx) => {
-                const isDone = idx < pipelineStage;
-                const isCurrent = idx === pipelineStage;
-                return (
-                  <div
-                    key={idx}
-                    className={`p-3 rounded-lg border transition-all ${
-                      isCurrent 
-                        ? 'bg-indigo-950/40 border-indigo-500/80 text-white' 
-                        : isDone 
-                          ? 'bg-neutral-900/60 border-emerald-900/60 text-emerald-300' 
-                          : 'bg-neutral-950/40 border-neutral-800 text-neutral-500'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      {isDone ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      ) : (
-                        <span className={`w-4 h-4 rounded-full text-[10px] flex items-center justify-center font-mono font-bold ${isCurrent ? 'bg-indigo-600 text-white' : 'bg-neutral-800 text-neutral-400'}`}>
-                          {idx + 1}
-                        </span>
-                      )}
-                      <span className="font-semibold text-xs truncate">{step.title}</span>
-                    </div>
-                    <p className="text-[11px] leading-tight text-neutral-400">
-                      {step.desc}
-                    </p>
-                  </div>
-                );
-              })}
             </div>
           </div>
         ) : mode === 'mic' ? (
           /* Live Microphone Mode */
-          <div className="space-y-6">
+          <div className="space-y-5">
+
+            {/* Mic Permission / Connection Error Banner */}
+            {micError && (
+              <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-800/80 text-amber-200 text-xs space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <h4 className="font-semibold text-white text-sm">
+                      Доступ к микрофону заблокирован браузером
+                    </h4>
+                    <p className="text-neutral-300 leading-relaxed">
+                      {micError}
+                    </p>
+                    <ol className="list-decimal pl-4 space-y-1 text-neutral-300 pt-1">
+                      <li>Нажмите на иконку замка или микрофона слева в адресной строке браузера.</li>
+                      <li>В строке «Микрофон» переключите значение на <strong>«Разрешить»</strong>.</li>
+                      <li>Нажмите кнопку <strong>«Попробовать снова»</strong> ниже.</li>
+                    </ol>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1 pl-7">
+                  <button
+                    onClick={() => {
+                      setMicError(null);
+                      startRecording();
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
+                  >
+                    Попробовать снова
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMicError(null);
+                      setMode('file');
+                    }}
+                    className="px-3.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 transition-colors"
+                  >
+                    Загрузить аудиофайл
+                  </button>
+                </div>
+              </div>
+            )}
+            
             {/* Visualizer and Timer Card */}
             <div className="p-6 rounded-xl bg-neutral-900 border border-neutral-800 space-y-5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className={`w-3 h-3 rounded-full ${recordingState === 'recording' ? 'bg-rose-500 animate-pulse' : recordingState === 'paused' ? 'bg-amber-400' : 'bg-neutral-600'}`} />
+                  <div className={`w-3 h-3 rounded-full ${
+                    recordingState === 'recording' ? 'bg-rose-500 animate-pulse' : 
+                    recordingState === 'paused' ? 'bg-amber-400' : 'bg-neutral-600'
+                  }`} />
                   <span className="text-xs font-medium text-neutral-300">
-                    {recordingState === 'recording' ? 'Идет запись лекции' : recordingState === 'paused' ? 'Запись на паузе' : 'Микрофон готов к работе'}
+                    {recordingState === 'recording' ? 'Идет запись...' : 
+                     recordingState === 'paused' ? 'Пауза' : 'Готов к записи'}
                   </span>
                 </div>
 
@@ -437,7 +717,7 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                     <Volume2 className="w-3.5 h-3.5 text-neutral-500" />
                     <span>{recordingState === 'recording' ? `${currentDecibels} dB` : '- - dB'}</span>
                   </div>
-                  <div className="text-xl font-bold text-white tabular-nums tracking-wider">
+                  <div className="text-2xl font-bold text-white tabular-nums tracking-wider">
                     {formatTime(elapsedSeconds)}
                   </div>
                 </div>
@@ -495,24 +775,24 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
 
                       <button
                         onClick={finishAndProcess}
-                        className="flex items-center gap-2 px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-all shadow-md shadow-indigo-900/40"
+                        className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-all shadow-md shadow-indigo-900/40"
                       >
                         <Square className="w-4 h-4 fill-white" />
-                        Завершить и транскрибировать
+                        Завершить и сохранить
                       </button>
                     </>
                   )}
                 </div>
 
                 <div className="text-xs text-neutral-500">
-                  Горячая клавиша: <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 font-mono text-[10px] text-neutral-300">Space</kbd> — пауза / запись
+                  <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 font-mono text-[10px] text-neutral-300">Space</kbd> — пауза / старт
                 </div>
               </div>
 
               {/* Bookmarks list if any */}
               {bookmarks.length > 0 && (
                 <div className="pt-3 border-t border-neutral-800 flex flex-wrap gap-2 text-xs">
-                  <span className="text-neutral-400 self-center">Метки лекции:</span>
+                  <span className="text-neutral-400 self-center">Метки:</span>
                   {bookmarks.map((bm, bIdx) => (
                     <span key={bIdx} className="px-2 py-1 rounded bg-neutral-800 text-neutral-300 font-mono text-[11px] flex items-center gap-1">
                       <Bookmark className="w-3 h-3 text-indigo-400" />
@@ -523,11 +803,10 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
               )}
             </div>
 
-            {/* Lecture Metadata inputs */}
+            {/* Lecture Details (Optional) */}
             <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
-              <h3 className="text-sm font-semibold text-neutral-200 flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-indigo-400" />
-                Параметры текущей лекции
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+                Информация о занятии (необязательно)
               </h3>
               
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -539,7 +818,7 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                     type="text"
                     value={lectureSubject}
                     onChange={(e) => setLectureSubject(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="Например: Высшая математика"
                   />
                 </div>
@@ -552,7 +831,7 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                     type="text"
                     value={lectureTitle}
                     onChange={(e) => setLectureTitle(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="Тема лекции"
                   />
                 </div>
@@ -565,41 +844,13 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                     type="text"
                     value={lecturerName}
                     onChange={(e) => setLecturerName(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="ФИО лектора"
                   />
                 </div>
               </div>
-
-              {/* Noise Profile selector */}
-              <div>
-                <label className="block text-xs font-medium text-neutral-400 mb-1.5">
-                  Акустический профиль аудитории (для VAD и шумоподавления)
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {[
-                    { id: 'quiet', title: 'Тихая аудитория', desc: 'Первые ряды, чистый звук' },
-                    { id: 'moderate', title: 'Обычный шум', desc: 'Шелест, легкий фоновый шум' },
-                    { id: 'noisy', title: 'Шумная задняя парта', desc: '10 dB SNR, разговоры вокруг' },
-                    { id: 'echo', title: 'Большой амфитеатр', desc: 'Поточная аудитория с эхом' },
-                  ].map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => setNoiseProfile(p.id as unknown as 'quiet')}
-                      className={`p-2.5 rounded-lg border text-left transition-all ${
-                        noiseProfile === p.id
-                          ? 'bg-indigo-950/40 border-indigo-500 text-white'
-                          : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                      }`}
-                    >
-                      <div className="font-semibold text-xs leading-none mb-1">{p.title}</div>
-                      <div className="text-[10px] text-neutral-500 leading-tight">{p.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
             </div>
+
           </div>
         ) : (
           /* File Upload Mode */
@@ -611,10 +862,10 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
 
               <div>
                 <h3 className="text-sm font-semibold text-white">
-                  Выберите или перетащите аудиофайл лекции
+                  Выберите аудиофайл для расшифровки
                 </h3>
                 <p className="text-xs text-neutral-400 mt-1">
-                  Поддерживаются форматы: MP3, WAV, M4A, OGG, FLAC (до 500 МБ)
+                  Поддерживаются форматы: MP3, WAV, M4A, OGG
                 </p>
               </div>
 
@@ -630,11 +881,11 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium cursor-pointer transition-colors"
               >
                 <UploadCloud className="w-4 h-4" />
-                Выбрать файл на диске
+                Выбрать аудиофайл
               </label>
 
               {selectedFile && (
-                <div className="mt-4 p-3 rounded-lg bg-neutral-950 border border-neutral-800 max-w-md mx-auto text-left flex items-center justify-between">
+                <div className="mt-4 p-4 rounded-xl bg-neutral-950 border border-neutral-800 max-w-md mx-auto text-left space-y-3">
                   <div className="flex items-center gap-2 truncate">
                     <FileAudio className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span className="text-xs text-neutral-200 truncate">{selectedFile.name}</span>
@@ -644,10 +895,11 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
                   </div>
 
                   <button
-                    onClick={finishAndProcess}
-                    className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shrink-0 ml-2"
+                    onClick={processUploadedAudio}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors shadow-sm"
                   >
-                    Запустить ASR
+                    <Sparkles className="w-4 h-4" />
+                    Расшифровать и создать конспект
                   </button>
                 </div>
               )}
@@ -661,39 +913,6 @@ $$y(x) = C_1 e^{\\lambda_1 x} + C_2 e^{\\lambda_2 x}$$
             )}
           </div>
         )}
-
-        {/* Quick Demo Lectures Preset Row */}
-        <div className="pt-4 border-t border-neutral-800">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-semibold text-neutral-400">
-              Быстрый запуск демо-лекций для тестирования интерфейса и формул:
-            </span>
-            <span className="text-[11px] text-neutral-500">
-              3 готовые университетские записи
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {SAMPLE_LECTURES.map((lec, idx) => (
-              <button
-                key={lec.id}
-                onClick={() => loadPresetLecture(idx)}
-                className="p-3 rounded-lg bg-neutral-900/60 hover:bg-neutral-850 border border-neutral-800 hover:border-neutral-700 text-left transition-all group"
-              >
-                <div className="flex items-center justify-between text-[11px] text-neutral-400 mb-1">
-                  <span>{lec.subject}</span>
-                  <span className="font-mono text-neutral-500">{Math.round(lec.durationSeconds / 60)} мин</span>
-                </div>
-                <div className="text-xs font-medium text-neutral-200 group-hover:text-indigo-300 transition-colors line-clamp-1 mb-1">
-                  {lec.title}
-                </div>
-                <div className="text-[10px] text-neutral-500">
-                  {lec.lecturer} · {lec.actionItems.length} задач · {lec.latexFormulas.length} формул
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
 
       </div>
     </div>

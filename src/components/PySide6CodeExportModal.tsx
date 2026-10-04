@@ -526,20 +526,7 @@ class LecturaApp(QMainWindow):
                     return json.load(f)
             except Exception:
                 pass
-        return [
-            {
-                "id": "demo-1",
-                "title": "Дифференциальные уравнения второго порядка",
-                "subject": "Высшая математика",
-                "lecturer": "Проф. Соколов В. П.",
-                "date": "28 сентября 2026",
-                "duration_min": 87,
-                "text": "## Лекция 7. Линейные неоднородные дифференциальные уравнения\\n\\ny'' + p y' + q y = f(x)\\nОбщее решение складывается из общего однородного и частного неоднородного решения.",
-                "tasks": [
-                    {"task": "Решить ДЗ из задачника Демидовича № 4120 - 4135", "deadline": "Пятница 23:59", "completed": False}
-                ]
-            }
-        ]
+        return []
 
     def save_lectures(self):
         try:

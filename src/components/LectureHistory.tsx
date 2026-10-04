@@ -7,11 +7,9 @@ import {
   CheckSquare, 
   FileCode, 
   BookOpen, 
-  Filter, 
   PlusCircle,
-  FileText,
   Upload,
-  Tag
+  AlertTriangle
 } from 'lucide-react';
 import { Lecture } from '../types';
 
@@ -35,6 +33,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
   const [search, setSearch] = useState('');
   const [selectedSubject, setSelectedSubject] = useState<string>('all');
   const [onlyWithTasks, setOnlyWithTasks] = useState(false);
+  const [deletingLecture, setDeletingLecture] = useState<Lecture | null>(null);
 
   // Extract unique subjects
   const subjects = ['all', ...Array.from(new Set(lectures.map(l => l.subject)))];
@@ -63,7 +62,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
               Мои лекции
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
-              Архив всех сохраненных записей и импортированных PDF ({lectures.length})
+              Архив всех сохраненных записей и конспектов ({lectures.length})
             </p>
           </div>
 
@@ -141,9 +140,15 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
             <div className="pt-2 flex justify-center gap-2">
               <button
                 onClick={onTriggerPdfUpload}
-                className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-200 font-medium"
+                className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-200 font-medium transition-colors"
               >
                 Импортировать PDF
+              </button>
+              <button
+                onClick={onNavigateToRecorder}
+                className="px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-medium transition-colors"
+              >
+                Записать с микрофона
               </button>
             </div>
           </div>
@@ -157,7 +162,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                 <div
                   key={lec.id}
                   onClick={() => onSelectLecture(lec)}
-                  className={`p-4 md:p-5 rounded-xl border transition-all cursor-pointer select-none group ${
+                  className={`p-4 md:p-5 rounded-xl border transition-all cursor-pointer select-none group relative ${
                     isSelected
                       ? 'bg-neutral-900 border-indigo-500/80 shadow-md shadow-indigo-950/20'
                       : 'bg-neutral-900/80 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900'
@@ -177,7 +182,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                         <span aria-hidden="true">·</span>
                         <span className="flex items-center gap-1 font-mono">
                           <Clock className="w-3 h-3 text-neutral-500" />
-                          {Math.round(lec.durationSeconds / 60)} мин
+                          {Math.max(1, Math.round(lec.durationSeconds / 60))} мин
                         </span>
                       </div>
 
@@ -192,16 +197,18 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                       </div>
 
                       {/* Tags */}
-                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                        {lec.tags.map((tag, tIdx) => (
-                          <span
-                            key={tIdx}
-                            className="px-2 py-0.5 rounded bg-neutral-950 border border-neutral-800 text-[10px] text-neutral-400"
-                          >
-                            #{tag}
-                          </span>
-                        ))}
-                      </div>
+                      {lec.tags && lec.tags.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          {lec.tags.map((tag, tIdx) => (
+                            <span
+                              key={tIdx}
+                              className="px-2 py-0.5 rounded bg-neutral-950 border border-neutral-800 text-[10px] text-neutral-400"
+                            >
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
 
                     </div>
 
@@ -219,7 +226,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                           </span>
                         )}
 
-                        {lec.latexFormulas.length > 0 && (
+                        {lec.latexFormulas && lec.latexFormulas.length > 0 && (
                           <span className="flex items-center gap-1 text-amber-400 font-mono text-[11px] px-2 py-1 rounded bg-amber-950/60 border border-amber-800/40">
                             <FileCode className="w-3.5 h-3.5" />
                             {lec.latexFormulas.length} формул
@@ -230,12 +237,10 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (confirm(`Удалить лекцию "${lec.title}"?`)) {
-                            onDeleteLecture(lec.id);
-                          }
+                          setDeletingLecture(lec);
                         }}
-                        className="p-1.5 rounded-lg text-neutral-500 hover:text-rose-400 hover:bg-neutral-800 transition-colors"
-                        title="Удалить"
+                        className="p-2 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-neutral-800 transition-colors"
+                        title="Удалить запись"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -244,6 +249,56 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* In-App Delete Confirmation Modal (Replaces flaky window.confirm) */}
+        {deletingLecture && (
+          <div 
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setDeletingLecture(null)}
+          >
+            <div 
+              className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-950/60 border border-rose-800/60 flex items-center justify-center text-rose-400 shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Удалить лекцию?</h3>
+                  <p className="text-xs text-neutral-400 mt-0.5 truncate max-w-[200px]">
+                    «{deletingLecture.title}»
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-neutral-300 leading-relaxed">
+                Запись будет удалена безвозвратно. Текст конспекта и все связанные с ней задачи будут стерты из приложения.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setDeletingLecture(null)}
+                  className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 font-medium transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const idToDelete = deletingLecture.id;
+                    setDeletingLecture(null);
+                    onDeleteLecture(idToDelete);
+                  }}
+                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs text-white font-medium transition-colors shadow-sm"
+                >
+                  Удалить
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

@@ -7,9 +7,8 @@ import {
   FileText, 
   Folder, 
   CheckCircle2, 
-  ShieldCheck, 
   FileAudio,
-  AlertTriangle
+  AlertCircle
 } from 'lucide-react';
 import { Lecture } from '../types';
 
@@ -25,10 +24,11 @@ export const StorageTab: React.FC<StorageTabProps> = ({
   onImportBackup,
 }) => {
   const [cleanedSuccess, setCleanedSuccess] = useState(false);
+  const [isConfirmingClear, setIsConfirmingClear] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
 
   // Compute storage statistics
   const audioCount = lectures.filter(l => l.audioFileName).length;
-  // Approximated: 1 min of audio ~ 0.5 MB; text is very lightweight (~20 KB per lecture)
   const totalAudioSeconds = lectures.reduce((acc, l) => acc + l.durationSeconds, 0);
   const audioSizeMb = ((totalAudioSeconds / 60) * 0.45).toFixed(1);
   const textSizeMb = ((lectures.length * 25) / 1024).toFixed(2);
@@ -50,6 +50,8 @@ export const StorageTab: React.FC<StorageTabProps> = ({
     link.download = `lectura_backup_${new Date().toISOString().split('T')[0]}.json`;
     link.click();
     URL.revokeObjectURL(url);
+    setStatusMessage({ text: 'Файл резервной копии успешно экспортирован!' });
+    setTimeout(() => setStatusMessage(null), 3000);
   };
 
   // Import JSON backup
@@ -62,24 +64,26 @@ export const StorageTab: React.FC<StorageTabProps> = ({
           const parsed = JSON.parse(event.target?.result as string);
           if (parsed && Array.isArray(parsed.lectures)) {
             onImportBackup(parsed.lectures);
-            alert(`Успешно импортировано ${parsed.lectures.length} лекций!`);
+            setStatusMessage({ text: `Успешно импортировано ${parsed.lectures.length} лекций!` });
+            setTimeout(() => setStatusMessage(null), 3000);
           } else {
-            alert('Файл резервной копии поврежден или имеет неверный формат.');
+            setStatusMessage({ text: 'Файл резервной копии поврежден или имеет неверный формат.', isError: true });
+            setTimeout(() => setStatusMessage(null), 4000);
           }
         } catch {
-          alert('Ошибка при чтении файла JSON.');
+          setStatusMessage({ text: 'Ошибка при чтении файла JSON.', isError: true });
+          setTimeout(() => setStatusMessage(null), 4000);
         }
       };
       reader.readAsText(file);
     }
   };
 
-  const handleClearCache = () => {
-    if (confirm('Очистить временные аудиофайлы? Текстовые конспекты, формулы и задачи останутся нетронутыми, но само исходное аудио будет удалено для экономии места.')) {
-      onClearAudioCache();
-      setCleanedSuccess(true);
-      setTimeout(() => setCleanedSuccess(false), 3000);
-    }
+  const executeClearAudio = () => {
+    onClearAudioCache();
+    setIsConfirmingClear(false);
+    setCleanedSuccess(true);
+    setTimeout(() => setCleanedSuccess(false), 3000);
   };
 
   return (
@@ -108,10 +112,21 @@ export const StorageTab: React.FC<StorageTabProps> = ({
           </div>
         </div>
 
+        {statusMessage && (
+          <div className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 ${
+            statusMessage.isError 
+              ? 'bg-rose-950/80 border-rose-800 text-rose-300' 
+              : 'bg-indigo-950/80 border-indigo-800 text-indigo-200'
+          }`}>
+            {statusMessage.isError ? <AlertCircle className="w-4 h-4 shrink-0" /> : <CheckCircle2 className="w-4 h-4 shrink-0" />}
+            <span>{statusMessage.text}</span>
+          </div>
+        )}
+
         {cleanedSuccess && (
           <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>Аудиокэш успешно очищен. Освобождено дисковое пространство. Все конспекты и задачи сохранены.</span>
+            <span>Аудиофайлы очищены. Освобождено дисковое пространство. Все конспекты сохранены.</span>
           </div>
         )}
 
@@ -168,12 +183,7 @@ export const StorageTab: React.FC<StorageTabProps> = ({
 
           <div className="p-3 rounded-lg bg-neutral-950 border border-neutral-800 font-mono text-xs text-neutral-300 flex items-center justify-between">
             <span className="truncate">~/Документы/LecturaAI/Конспекты/</span>
-            <button
-              onClick={() => alert('Открытие папки в проводнике (в PySide6 вызывается QDesktopServices.openUrl)')}
-              className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-sans transition-colors shrink-0 ml-2"
-            >
-              Открыть папку
-            </button>
+            <span className="text-[11px] text-neutral-500 font-sans">Локальная папка</span>
           </div>
         </div>
 
@@ -197,7 +207,7 @@ export const StorageTab: React.FC<StorageTabProps> = ({
               </div>
 
               <button
-                onClick={handleClearCache}
+                onClick={() => setIsConfirmingClear(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-rose-400 hover:text-rose-300 text-xs font-medium transition-colors shrink-0 self-start sm:self-center"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -236,6 +246,52 @@ export const StorageTab: React.FC<StorageTabProps> = ({
 
           </div>
         </div>
+
+        {/* Confirmation Modal for Clearing Audio */}
+        {isConfirmingClear && (
+          <div 
+            className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setIsConfirmingClear(false)}
+          >
+            <div 
+              className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-950/60 border border-amber-800/60 flex items-center justify-center text-amber-400 shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Очистить аудиофайлы?</h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    Будет освобождено ~{audioSizeMb} МБ
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-neutral-300 leading-relaxed">
+                Текстовые конспекты, формулы и дедлайны останутся нетронутыми. Будут удалены только исходные аудиозаписи.
+              </p>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsConfirmingClear(false)}
+                  className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 font-medium transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={executeClearAudio}
+                  className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs text-white font-medium transition-colors shadow-sm"
+                >
+                  Очистить
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>

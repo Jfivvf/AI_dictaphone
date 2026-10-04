@@ -57,21 +57,27 @@ export default function App() {
   // Hidden file input ref for PDF/Markdown import
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Lectures collection
+  // Lectures collection (starts clean and empty like a new notes app)
   const [lectures, setLectures] = useState<Lecture[]>(() => {
     const saved = localStorage.getItem('lectura_ai_lectures');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        // If it was previous dummy math analysis sample, clear it to start clean
+        if (Array.isArray(parsed) && parsed.some(l => l.id === 'lec-math-01')) {
+          localStorage.removeItem('lectura_ai_lectures');
+          return [];
+        }
+        return parsed;
       } catch {
-        return SAMPLE_LECTURES;
+        return [];
       }
     }
-    return SAMPLE_LECTURES;
+    return [];
   });
 
   // Current active lecture being viewed
-  const [activeLectureId, setActiveLectureId] = useState<string>(SAMPLE_LECTURES[0].id);
+  const [activeLectureId, setActiveLectureId] = useState<string | null>(null);
 
   // App settings
   const [settings, setSettings] = useState<AppSettings>(() => {
@@ -191,53 +197,6 @@ export default function App() {
       // Reset input value so same file can be selected again
       if (e.target) e.target.value = '';
     }
-  };
-
-  // Pre-loaded sample PDF demonstration
-  const handleLoadSamplePdf = () => {
-    const sampleText = `## Лекция: Квантовая теория поля и уравнения Дирака
-*Материалы курса теоретической физики*
-
-### 1. Релятивистское волновое уравнение Дирака
-$$(i \\gamma^\\mu \\partial_\\mu - m) \\psi = 0$$
-
-где матрицы Дирака $\\gamma^\\mu$ удовлетворяют антикоммутационным соотношениям Клиффорда:
-$$\\{\\gamma^\\mu, \\gamma^\\nu\\} = 2 g^{\\mu\\nu} I_4$$
-
-### 2. Спин-орбитальное взаимодействие
-Уравнение естественным образом предсказывает наличие собственного спина электрона $s = 1/2$ и гиромагнитного отношения $g = 2$.
-
-### Задания и дедлайны по материалам:
-- Подготовить отчет по семинару: вывод уравнения непрерывности $\\partial_\\mu j^\\mu = 0$ для дираковского тока.
-- Сдать типовой расчет № 3 к четвергу, 15 октября 23:59.
-- Коллоквиум по релятивистской квантовой механике назначен на 22 октября.`;
-
-    const samplePdfLecture = convertTextToLecture(sampleText, 'Квантовая_механика_лекция_08.pdf');
-    samplePdfLecture.subject = 'Теоретическая физика';
-    samplePdfLecture.lecturer = 'Проф. Румянцев К. Д.';
-    samplePdfLecture.actionItems = [
-      {
-        id: `sample-pdf-task-1`,
-        task: 'Вывести уравнение непрерывности для тока Дирака (j^μ = ψ̄ γ^μ ψ)',
-        deadline: 'Четверг, 15 октября',
-        dateISO: '2026-10-15',
-        type: 'homework',
-        completed: false,
-        priority: 'high'
-      },
-      {
-        id: `sample-pdf-task-2`,
-        task: 'Подготовка к коллоквиуму по уравнениям Дирака и Клейна-Гордона',
-        deadline: '22 октября 10:00',
-        dateISO: '2026-10-22',
-        type: 'exam',
-        completed: false,
-        priority: 'high'
-      }
-    ];
-
-    handleLectureCreated(samplePdfLecture);
-    setActiveTab('viewer');
   };
 
   // Count pending deadlines
@@ -385,13 +344,6 @@ $$\\{\\gamma^\\mu, \\gamma^\\nu\\} = 2 g^{\\mu\\nu} I_4$$
               <Upload className="w-3.5 h-3.5 text-indigo-400" />
               <span>{isProcessingPdf ? 'Чтение PDF...' : 'Импорт PDF / .MD'}</span>
             </button>
-
-            <button
-              onClick={handleLoadSamplePdf}
-              className="w-full text-center text-[10px] text-neutral-500 hover:text-neutral-300 py-1 transition-colors"
-            >
-              Загрузить пример PDF-конспекта
-            </button>
           </div>
         </aside>
 
@@ -432,6 +384,7 @@ $$\\{\\gamma^\\mu, \\gamma^\\nu\\} = 2 g^{\\mu\\nu} I_4$$
               onUpdateLecture={handleUpdateLecture}
               onBackToHistory={() => setActiveTab('history')}
               onNavigateToRecorder={() => setActiveTab('record')}
+              onDeleteLecture={handleDeleteLecture}
             />
           )}
 

@@ -16,7 +16,8 @@ import {
   Bookmark,
   FileCode,
   ArrowLeft,
-  Share2
+  Share2,
+  Trash2
 } from 'lucide-react';
 import { Lecture, ActionItem } from '../types';
 import { LatexRenderer, SingleFormula } from './LatexRenderer';
@@ -26,6 +27,7 @@ interface LectureViewerProps {
   onUpdateLecture: (updated: Lecture) => void;
   onBackToHistory: () => void;
   onNavigateToRecorder: () => void;
+  onDeleteLecture?: (lectureId: string) => void;
 }
 
 export const LectureViewer: React.FC<LectureViewerProps> = ({
@@ -33,11 +35,13 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
   onUpdateLecture,
   onBackToHistory,
   onNavigateToRecorder,
+  onDeleteLecture,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'summary' | 'tasks' | 'transcript'>('summary');
   const [searchQuery, setSearchQuery] = useState('');
   const [isEditingMarkdown, setIsEditingMarkdown] = useState(false);
   const [editedMarkdown, setEditedMarkdown] = useState(lecture?.summaryMarkdown || '');
+  const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
 
   if (!lecture) {
     return (
@@ -227,6 +231,16 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
               <FileCode className="w-3.5 h-3.5 text-amber-400" />
               <span>.TEX</span>
             </button>
+
+            {onDeleteLecture && (
+              <button
+                onClick={() => setIsConfirmingDelete(true)}
+                className="p-1.5 rounded-lg bg-neutral-800/80 hover:bg-neutral-700 text-neutral-400 hover:text-rose-400 border border-neutral-700 transition-colors ml-1"
+                title="Удалить лекцию"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -502,6 +516,56 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
 
         </div>
       </div>
+
+      {/* In-App Delete Confirmation Modal */}
+      {isConfirmingDelete && onDeleteLecture && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setIsConfirmingDelete(false)}
+        >
+          <div 
+            className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-950/60 border border-rose-800/60 flex items-center justify-center text-rose-400 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Удалить лекцию?</h3>
+                <p className="text-xs text-neutral-400 mt-0.5 truncate max-w-[200px]">
+                  «{lecture.title}»
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              Запись будет удалена безвозвратно. Текст конспекта и связанные задачи будут стерты из приложения.
+            </p>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsConfirmingDelete(false)}
+                className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 font-medium transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsConfirmingDelete(false);
+                  onDeleteLecture(lecture.id);
+                  onBackToHistory();
+                }}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs text-white font-medium transition-colors shadow-sm"
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
