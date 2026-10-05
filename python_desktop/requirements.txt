@@ -1,20 +1,7 @@
-# Зависимости для автономного десктопного диктофона Lectura AI (Python 3.10 - 3.12)
-
-# Графический интерфейс Qt6
-PySide6>=6.6.0
-
-# Локальное распознавание речи
-faster-whisper>=1.0.3
-
-# Локальная языковая модель (GGUF инференс)
-llama-cpp-python>=0.2.85
-
-# Захват аудио с микрофона и сохранение WAV
-sounddevice>=0.4.6
-soundfile>=0.12.1
-numpy>=1.24.0
-
-# Импорт и парсинг PDF файлов
-pypdf>=4.2.0
-
-# База данных и шифрование (SQLite встроен в Python)
+PySide6>=6.7.0
+PySide6-Addons>=6.7.0
+faster-whisper>=1.1.0
+sounddevice>=0.5.1
+numpy>=1.26.0
+pypdf>=5.1.0
+google-genai>=1.0.0
