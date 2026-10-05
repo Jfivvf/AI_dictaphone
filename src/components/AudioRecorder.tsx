@@ -183,8 +183,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
             }
           };
 
-          recognition.onerror = (e: any) => {
-            console.warn('Browser speech recognition info:', e.error);
+          recognition.onerror = () => {
+            // Ignore browser speech recognition events ('aborted', 'no-speech', etc.) since backend AI handles full transcription
           };
 
           recognition.onend = () => {
@@ -296,10 +296,10 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   };
 
   const addBookmark = () => {
-    const bookmarkTitle = prompt('Заметка к текущему моменту:', 'Важный тезис');
-    if (bookmarkTitle) {
-      setBookmarks(prev => [...prev, { time: elapsedSeconds, note: bookmarkTitle }]);
-    }
+    setBookmarks(prev => [
+      ...prev,
+      { time: elapsedSeconds, note: `Важный момент #${prev.length + 1}` }
+    ]);
   };
 
   // Stop recording and perform REAL AI speech recognition
@@ -817,6 +817,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                   <input
                     type="text"
                     value={lectureSubject}
+                    maxLength={200}
                     onChange={(e) => setLectureSubject(e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="Например: Высшая математика"
@@ -830,6 +831,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                   <input
                     type="text"
                     value={lectureTitle}
+                    maxLength={300}
                     onChange={(e) => setLectureTitle(e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="Тема лекции"
@@ -843,6 +845,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                   <input
                     type="text"
                     value={lecturerName}
+                    maxLength={200}
                     onChange={(e) => setLecturerName(e.target.value)}
                     className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     placeholder="ФИО лектора"

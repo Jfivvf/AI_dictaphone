@@ -1,17 +1,37 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Mic, 
-  BookOpen, 
-  CalendarCheck, 
-  HardDrive, 
-  Settings, 
-  User, 
+import {
+  Mic,
+  BookOpen,
+  CalendarCheck,
+  HardDrive,
+  Settings,
+  User,
   Upload,
-  FileText
+  LogOut,
+  LogIn
 } from 'lucide-react';
+import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { Lecture, AppSettings, StudentProfile, ActionItem } from './types';
-import { SAMPLE_LECTURES } from './data/sampleLectures';
-import { extractTextFromPdf, convertTextToLecture } from './utils/pdfParser';
+import { smartImportDocumentToLecture } from './utils/pdfParser';
+import {
+  auth,
+  db,
+  sanitizeId,
+  ensureUserProfileInFirestore,
+  updateUserProfileInFirestore,
+  createLectureInFirestore,
+  updateLectureInFirestore,
+  deleteLectureFromFirestore,
+  toggleTaskInFirestore,
+  updateTaskPriorityInFirestore,
+  addTaskToFirestore,
+  loadTasksForLecture,
+  mapDocToLecture,
+  signOutUser,
+  handleFirestoreError,
+  OperationType
+} from './firebase';
 import { DesktopHeader } from './components/DesktopHeader';
 import { AudioRecorder } from './components/AudioRecorder';
 import { LectureViewer } from './components/LectureViewer';
@@ -21,6 +41,7 @@ import { StorageTab } from './components/StorageTab';
 import { SettingsTab } from './components/SettingsTab';
 import { StudentProfileTab } from './components/StudentProfileTab';
 import { PySide6CodeExportModal } from './components/PySide6CodeExportModal';
+import { AuthScreen } from './components/AuthScreen';
 
 const DEFAULT_SETTINGS: AppSettings = {
   asrModel: 'faster-whisper-turbo',
@@ -48,22 +69,26 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export default function App() {
+  // Authentication state
+  const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isOfflineGuest, setIsOfflineGuest] = useState(false);
+
   // Navigation active tab: 'record' | 'history' | 'viewer' | 'deadlines' | 'storage' | 'settings' | 'profile'
   const [activeTab, setActiveTab] = useState<'record' | 'history' | 'viewer' | 'deadlines' | 'storage' | 'settings' | 'profile'>('history');
-  
+
   // Loading state for PDF processing
   const [isProcessingPdf, setIsProcessingPdf] = useState(false);
 
   // Hidden file input ref for PDF/Markdown import
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Lectures collection (starts clean and empty like a new notes app)
+  // Lectures collection
   const [lectures, setLectures] = useState<Lecture[]>(() => {
     const saved = localStorage.getItem('lectura_ai_lectures');
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // If it was previous dummy math analysis sample, clear it to start clean
         if (Array.isArray(parsed) && parsed.some(l => l.id === 'lec-math-01')) {
           localStorage.removeItem('lectura_ai_lectures');
           return [];
@@ -95,12 +120,73 @@ export default function App() {
   // PySide6 code export modal state
   const [isPySideModalOpen, setIsPySideModalOpen] = useState(false);
 
-  // Persist lectures
-  useEffect(() => {
-    localStorage.setItem('lectura_ai_lectures', JSON.stringify(lectures));
-  }, [lectures]);
+  // Logout confirmation modal state
+  const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
 
-  // Persist settings
+  // Track Firebase Auth state
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setIsOfflineGuest(false);
+        try {
+          const syncedProfile = await ensureUserProfileInFirestore(user, DEFAULT_SETTINGS.student);
+          setSettings(prev => ({
+            ...prev,
+            student: syncedProfile
+          }));
+        } catch (err) {
+          console.error('Error initializing user profile in Firestore:', err);
+        }
+      }
+      setCurrentUser(user);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribeAuth();
+  }, []);
+
+  // Subscribe to user's lectures in Firestore when authenticated
+  useEffect(() => {
+    if (!isAuthReady || !currentUser) return;
+
+    const safeUid = sanitizeId(currentUser.uid, 'user');
+    const lecturesPath = `users/${safeUid}/lectures`;
+    const lecturesCol = collection(db, 'users', safeUid, 'lectures');
+    const lecturesQuery = query(lecturesCol, where('ownerId', '==', safeUid));
+
+    const unsubscribeLectures = onSnapshot(
+      lecturesQuery,
+      async (snapshot) => {
+        try {
+          const loadedLectures: Lecture[] = await Promise.all(
+            snapshot.docs.map(async (docSnap) => {
+              const data = docSnap.data();
+              const lectureId = data.id || docSnap.id;
+              const tasks = await loadTasksForLecture(safeUid, lectureId);
+              return mapDocToLecture(docSnap.id, data, tasks);
+            })
+          );
+          setLectures(loadedLectures);
+          setActiveLectureId(prev => prev || loadedLectures[0]?.id || null);
+        } catch (err) {
+          console.error('Error loading tasks for lectures:', err);
+        }
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, lecturesPath);
+      }
+    );
+
+    return () => unsubscribeLectures();
+  }, [isAuthReady, currentUser]);
+
+  // Persist lectures to localStorage in guest mode
+  useEffect(() => {
+    if (!currentUser) {
+      localStorage.setItem('lectura_ai_lectures', JSON.stringify(lectures));
+    }
+  }, [lectures, currentUser]);
+
+  // Persist settings to localStorage
   useEffect(() => {
     localStorage.setItem('lectura_ai_settings', JSON.stringify(settings));
   }, [settings]);
@@ -109,63 +195,193 @@ export default function App() {
   const activeLecture = lectures.find(l => l.id === activeLectureId) || lectures[0] || null;
 
   // Handlers
-  const handleLectureCreated = (newLecture: Lecture) => {
-    setLectures(prev => [newLecture, ...prev]);
-    setActiveLectureId(newLecture.id);
+  const handleLectureCreated = async (newLecture: Lecture) => {
+    if (currentUser) {
+      try {
+        const savedLecture = await createLectureInFirestore(currentUser.uid, newLecture);
+        setLectures(prev => {
+          const exists = prev.some(l => l.id === savedLecture.id);
+          return exists ? prev.map(l => (l.id === savedLecture.id ? savedLecture : l)) : [savedLecture, ...prev];
+        });
+        setActiveLectureId(savedLecture.id);
+      } catch (err) {
+        console.error('Failed to save lecture to Firestore:', err);
+      }
+    } else {
+      setLectures(prev => [newLecture, ...prev]);
+      setActiveLectureId(newLecture.id);
+    }
   };
 
-  const handleUpdateLecture = (updated: Lecture) => {
-    setLectures(prev => prev.map(l => l.id === updated.id ? updated : l));
-  };
-
-  const handleDeleteLecture = (lectureId: string) => {
-    setLectures(prev => prev.filter(l => l.id !== lectureId));
-    if (activeLectureId === lectureId) {
-      const remaining = lectures.filter(l => l.id !== lectureId);
-      if (remaining.length > 0) {
-        setActiveLectureId(remaining[0].id);
+  const handleUpdateLecture = async (updated: Lecture) => {
+    setLectures(prev => prev.map(l => (l.id === updated.id ? updated : l)));
+    if (currentUser) {
+      try {
+        await updateLectureInFirestore(currentUser.uid, updated);
+      } catch (err) {
+        console.error('Failed to update lecture in Firestore:', err);
       }
     }
   };
 
-  const handleToggleTask = (lectureId: string, taskId: string) => {
-    setLectures(prev => prev.map(lec => {
-      if (lec.id !== lectureId) return lec;
-      return {
-        ...lec,
-        actionItems: lec.actionItems.map(item => 
-          item.id === taskId ? { ...item, completed: !item.completed } : item
-        )
-      };
-    }));
+  const handleDeleteLecture = async (lectureId: string) => {
+    setLectures(prev => prev.filter(l => l.id !== lectureId));
+    if (activeLectureId === lectureId) {
+      const remaining = lectures.filter(l => l.id !== lectureId);
+      setActiveLectureId(remaining.length > 0 ? remaining[0].id : null);
+    }
+    if (currentUser) {
+      try {
+        await deleteLectureFromFirestore(currentUser.uid, lectureId);
+      } catch (err) {
+        console.error('Failed to delete lecture from Firestore:', err);
+      }
+    }
   };
 
-  const handleAddNewTask = (newTask: ActionItem, lectureId?: string) => {
-    setLectures(prev => prev.map(lec => {
-      if (lec.id !== lectureId && lec.id !== prev[0]?.id) return lec;
-      return {
-        ...lec,
-        actionItems: [newTask, ...lec.actionItems]
-      };
-    }));
+  const handleToggleTask = async (lectureId: string, taskId: string) => {
+    let newCompletedState = false;
+    setLectures(prev =>
+      prev.map(lec => {
+        if (lec.id !== lectureId) return lec;
+        return {
+          ...lec,
+          actionItems: lec.actionItems.map(item => {
+            if (item.id === taskId) {
+              newCompletedState = !item.completed;
+              return { ...item, completed: newCompletedState };
+            }
+            return item;
+          })
+        };
+      })
+    );
+
+    if (currentUser) {
+      try {
+        await toggleTaskInFirestore(currentUser.uid, lectureId, taskId, newCompletedState);
+      } catch (err) {
+        console.error('Failed to toggle task in Firestore:', err);
+      }
+    }
   };
 
-  const handleClearAudioCache = () => {
-    setLectures(prev => prev.map(l => ({ ...l, audioFileName: undefined })));
+  const handleChangeTaskPriority = async (
+    lectureId: string,
+    taskId: string,
+    priority: 'high' | 'medium' | 'low'
+  ) => {
+    setLectures(prev =>
+      prev.map(lec => {
+        if (lec.id !== lectureId) return lec;
+        return {
+          ...lec,
+          actionItems: lec.actionItems.map(item =>
+            item.id === taskId ? { ...item, priority } : item
+          )
+        };
+      })
+    );
+
+    if (currentUser) {
+      try {
+        await updateTaskPriorityInFirestore(currentUser.uid, lectureId, taskId, priority);
+      } catch (err) {
+        console.error('Failed to update task priority in Firestore:', err);
+      }
+    }
   };
 
-  const handleImportBackup = (backupLectures: Lecture[]) => {
+  const handleAddNewTask = async (newTask: ActionItem, lectureId?: string) => {
+    const targetLectureId = lectureId || lectures[0]?.id;
+    if (!targetLectureId) return;
+
+    if (currentUser) {
+      try {
+        const savedTask = await addTaskToFirestore(currentUser.uid, targetLectureId, newTask);
+        setLectures(prev =>
+          prev.map(lec => {
+            if (lec.id !== targetLectureId) return lec;
+            return {
+              ...lec,
+              actionItems: [savedTask, ...lec.actionItems]
+            };
+          })
+        );
+      } catch (err) {
+        console.error('Failed to add task to Firestore:', err);
+      }
+    } else {
+      setLectures(prev =>
+        prev.map(lec => {
+          if (lec.id !== targetLectureId) return lec;
+          return {
+            ...lec,
+            actionItems: [newTask, ...lec.actionItems]
+          };
+        })
+      );
+    }
+  };
+
+  const handleClearAudioCache = async () => {
+    const updatedList = lectures.map(l => ({ ...l, audioFileName: undefined }));
+    setLectures(updatedList);
+    if (currentUser) {
+      for (const lec of updatedList) {
+        try {
+          await updateLectureInFirestore(currentUser.uid, lec);
+        } catch (err) {
+          console.error('Failed to clear audio cache in Firestore for lecture:', lec.id, err);
+        }
+      }
+    }
+  };
+
+  const handleImportBackup = async (backupLectures: Lecture[]) => {
     setLectures(backupLectures);
     if (backupLectures.length > 0) {
       setActiveLectureId(backupLectures[0].id);
     }
+    if (currentUser) {
+      for (const lec of backupLectures) {
+        try {
+          await createLectureInFirestore(currentUser.uid, lec);
+        } catch (err) {
+          console.error('Failed to import backup lecture to Firestore:', err);
+        }
+      }
+    }
   };
 
-  const handleUpdateProfile = (newProfile: StudentProfile) => {
+  const handleUpdateProfile = async (newProfile: StudentProfile) => {
     setSettings(prev => ({ ...prev, student: newProfile }));
+    if (currentUser) {
+      try {
+        await updateUserProfileInFirestore(currentUser.uid, newProfile);
+      } catch (err) {
+        console.error('Failed to update user profile in Firestore:', err);
+      }
+    }
   };
 
-  // Import PDF or Markdown / Text file
+  const handleSignOut = async () => {
+    try {
+      setIsLogoutModalOpen(false);
+      await signOutUser();
+      setLectures([]);
+      setActiveLectureId(null);
+      setIsOfflineGuest(false);
+    } catch (err) {
+      console.error('Sign out error:', err);
+    }
+  };
+
+  const requestSignOut = () => {
+    setIsLogoutModalOpen(true);
+  };
+
+  // Import PDF or Markdown / Text file with automatic AI structuring
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -173,35 +389,35 @@ export default function App() {
     setIsProcessingPdf(true);
 
     try {
-      if (file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf') {
-        const text = await extractTextFromPdf(file);
-        const newLecture = convertTextToLecture(text, file.name);
-        handleLectureCreated(newLecture);
-        setActiveTab('viewer');
-      } else {
-        // Plain text / Markdown / TeX
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const text = event.target?.result as string;
-          const newLecture = convertTextToLecture(text, file.name);
-          handleLectureCreated(newLecture);
-          setActiveTab('viewer');
-        };
-        reader.readAsText(file);
-      }
+      const newLecture = await smartImportDocumentToLecture(file);
+      await handleLectureCreated(newLecture);
+      setActiveTab('viewer');
     } catch (err) {
       console.error('Error importing document:', err);
-      alert('Не удалось обработать файл. Попробуйте другой PDF или Markdown документ.');
     } finally {
       setIsProcessingPdf(false);
-      // Reset input value so same file can be selected again
       if (e.target) e.target.value = '';
     }
   };
 
+  // Show loading screen while Firebase Auth initializes
+  if (!isAuthReady) {
+    return (
+      <div className="h-screen w-screen bg-neutral-950 flex items-center justify-center text-neutral-400 text-xs">
+        Подключение к базе данных...
+      </div>
+    );
+  }
+
+  // Show Login / Registration screen if not authenticated and not in offline guest mode
+  if (!currentUser && !isOfflineGuest) {
+    return <AuthScreen onContinueOffline={() => setIsOfflineGuest(true)} />;
+  }
+
   // Count pending deadlines
-  const totalPendingDeadlines = lectures.reduce((acc, l) => 
-    acc + l.actionItems.filter(t => !t.completed).length, 0
+  const totalPendingDeadlines = lectures.reduce(
+    (acc, l) => acc + l.actionItems.filter(t => !t.completed).length,
+    0
   );
 
   return (
@@ -213,6 +429,11 @@ export default function App() {
         onOpenPySideCode={() => setIsPySideModalOpen(true)}
         onNavigateToAccount={() => setActiveTab('profile')}
         activeTab={activeTab}
+        userEmail={currentUser?.email}
+        userPhotoUrl={currentUser?.photoURL}
+        isAuthenticated={Boolean(currentUser)}
+        onSignOut={requestSignOut}
+        onRequireSignIn={() => setIsOfflineGuest(false)}
       />
 
       {/* Main Container */}
@@ -326,7 +547,7 @@ export default function App() {
 
           </div>
 
-          {/* Import PDF and Documents in Sidebar Footer */}
+          {/* Import PDF and Auth Controls in Sidebar Footer */}
           <div className="p-3 border-t border-neutral-800 space-y-2">
             <input
               type="file"
@@ -342,8 +563,26 @@ export default function App() {
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 text-xs font-medium transition-colors disabled:opacity-50"
             >
               <Upload className="w-3.5 h-3.5 text-indigo-400" />
-              <span>{isProcessingPdf ? 'Чтение PDF...' : 'Импорт PDF / .MD'}</span>
+              <span>{isProcessingPdf ? 'Анализ и верстка ИИ...' : 'Импорт PDF / .MD'}</span>
             </button>
+
+            {currentUser ? (
+              <button
+                onClick={requestSignOut}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/50 text-rose-300 text-xs font-medium transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                <span>Выйти из аккаунта</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => setIsOfflineGuest(false)}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 text-xs font-medium transition-colors"
+              >
+                <LogIn className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Войти в аккаунт</span>
+              </button>
+            )}
           </div>
         </aside>
 
@@ -382,6 +621,7 @@ export default function App() {
             <LectureViewer
               lecture={activeLecture}
               onUpdateLecture={handleUpdateLecture}
+              onChangeTaskPriority={handleChangeTaskPriority}
               onBackToHistory={() => setActiveTab('history')}
               onNavigateToRecorder={() => setActiveTab('record')}
               onDeleteLecture={handleDeleteLecture}
@@ -393,6 +633,7 @@ export default function App() {
             <DeadlinesTab
               lectures={lectures}
               onToggleTask={handleToggleTask}
+              onChangeTaskPriority={handleChangeTaskPriority}
               onOpenLecture={(lecId) => {
                 setActiveLectureId(lecId);
                 setActiveTab('viewer');
@@ -423,12 +664,63 @@ export default function App() {
             <StudentProfileTab
               profile={settings.student}
               onUpdateProfile={handleUpdateProfile}
+              isAuthenticated={Boolean(currentUser)}
+              userEmail={currentUser?.email}
+              userUid={currentUser?.uid}
+              onSignOut={requestSignOut}
+              onRequireSignIn={() => setIsOfflineGuest(false)}
             />
           )}
 
         </main>
 
       </div>
+
+      {/* Logout Confirmation Modal */}
+      {isLogoutModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setIsLogoutModalOpen(false)}
+        >
+          <div
+            className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-950/60 border border-rose-800/60 flex items-center justify-center text-rose-400 shrink-0">
+                <LogOut className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Вы точно хотите выйти?</h3>
+                <p className="text-xs text-neutral-400 mt-0.5 truncate max-w-[210px]">
+                  {currentUser?.email || 'Выход из учетной записи'}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-300 leading-relaxed">
+              Ваши лекции и дедлайны сохранены в облаке и будут доступны при следующем входе в аккаунт.
+            </p>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsLogoutModalOpen(false)}
+                className="px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300 font-medium transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-xs text-white font-medium transition-colors shadow-sm"
+              >
+                Выйти
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* PySide6 Code Modal */}
       <PySide6CodeExportModal

@@ -1,0 +1,334 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isParentUserValid(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        get(/databases/$(database)/documents/users/$(userId)).data.uid == request.auth.uid;
+    }
+
+    function isParentLectureValid(userId, lectureId) {
+      return exists(/databases/$(database)/documents/users/$(userId)/lectures/$(lectureId)) &&
+        get(/databases/$(database)/documents/users/$(userId)/lectures/$(lectureId)).data.ownerId == request.auth.uid;
+    }
+
+    // =========================================================================
+    // Validation Blueprints (Anti-Update-Gap)
+    // =========================================================================
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'name', 'university', 'faculty', 'group',
+          'semester', 'degree', 'theme', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'name', 'university', 'faculty', 'group',
+          'semester', 'degree', 'theme', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.uid == userId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 150 &&
+        data.university is string && data.university.size() >= 1 && data.university.size() <= 200 &&
+        data.faculty is string && data.faculty.size() >= 1 && data.faculty.size() <= 200 &&
+        data.group is string && data.group.size() >= 1 && data.group.size() <= 50 &&
+        data.semester is number && data.semester >= 1 && data.semester <= 12 &&
+        data.degree is string && data.degree.size() >= 1 && data.degree.size() <= 20 &&
+        (data.degree == 'Bachelor' || data.degree == 'Master' || data.degree == 'Specialist') &&
+        data.theme is string && data.theme.size() >= 1 && data.theme.size() <= 10 &&
+        (data.theme == 'dark' || data.theme == 'light') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.uid == userId &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLectureDoc(data, userId, lectureId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'title', 'subject', 'lecturer', 'date',
+          'durationSeconds', 'audioFileName', 'tags', 'noiseLevel',
+          'modelUsed', 'quantization', 'summaryMarkdown', 'transcriptText',
+          'formulasLatex', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'subject', 'lecturer', 'date',
+          'durationSeconds', 'audioFileName', 'tags', 'noiseLevel',
+          'modelUsed', 'quantization', 'summaryMarkdown', 'transcriptText',
+          'formulasLatex', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.id == lectureId &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+        data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.ownerId == userId &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+        data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 200 &&
+        data.lecturer is string && data.lecturer.size() >= 1 && data.lecturer.size() <= 200 &&
+        data.date is string && data.date.size() >= 1 && data.date.size() <= 100 &&
+        data.durationSeconds is number && data.durationSeconds >= 0 && data.durationSeconds <= 86400 &&
+        data.audioFileName is string && data.audioFileName.size() <= 255 &&
+        data.tags is list && data.tags.size() >= 1 && data.tags.size() <= 10 &&
+        data.tags[0] is string && data.tags[0].size() >= 1 && data.tags[0].size() <= 100 &&
+        data.noiseLevel is string && data.noiseLevel.size() >= 1 && data.noiseLevel.size() <= 20 &&
+        (data.noiseLevel == 'quiet' || data.noiseLevel == 'moderate' || data.noiseLevel == 'noisy' || data.noiseLevel == 'echo') &&
+        data.modelUsed is string && data.modelUsed.size() >= 1 && data.modelUsed.size() <= 200 &&
+        data.quantization is string && data.quantization.size() >= 1 && data.quantization.size() <= 100 &&
+        data.summaryMarkdown is string && data.summaryMarkdown.size() >= 1 && data.summaryMarkdown.size() <= 100000 &&
+        data.transcriptText is string && data.transcriptText.size() >= 1 && data.transcriptText.size() <= 100000 &&
+        data.formulasLatex is list && data.formulasLatex.size() <= 20 &&
+        (data.formulasLatex.size() == 0 || (data.formulasLatex[0] is string && data.formulasLatex[0].size() >= 1 && data.formulasLatex[0].size() <= 1000)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTaskDoc(data, userId, lectureId, taskId) {
+      return data.keys().hasAll([
+          'id', 'lectureId', 'ownerId', 'task', 'deadline', 'dateISO',
+          'type', 'completed', 'priority', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'lectureId', 'ownerId', 'task', 'deadline', 'dateISO',
+          'type', 'completed', 'priority', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.id == taskId &&
+        data.lectureId is string && data.lectureId.size() >= 1 && data.lectureId.size() <= 128 &&
+        data.lectureId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.lectureId == lectureId &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
+        data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.ownerId == userId &&
+        data.task is string && data.task.size() >= 1 && data.task.size() <= 1000 &&
+        data.deadline is string && data.deadline.size() >= 1 && data.deadline.size() <= 200 &&
+        data.dateISO is string && data.dateISO.size() >= 1 && data.dateISO.size() <= 40 &&
+        data.type is string && data.type.size() >= 1 && data.type.size() <= 20 &&
+        (data.type == 'homework' || data.type == 'exam' || data.type == 'reading' || data.type == 'project' || data.type == 'colloquium') &&
+        data.completed is bool &&
+        data.priority is string && data.priority.size() >= 1 && data.priority.size() <= 10 &&
+        (data.priority == 'high' || data.priority == 'medium' || data.priority == 'low') &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection 1: /users/{userId}
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isOwner(userId) &&
+        isValidId(userId) &&
+        (resource == null || existing().uid == request.auth.uid);
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if (
+        isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action: Update academic profile fields
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'university', 'faculty', 'group', 'semester', 'degree', 'theme', 'updatedAt'
+          ])
+        )
+      );
+
+      allow delete: if isOwner(userId) && isValidId(userId) && existing().uid == request.auth.uid;
+
+      // =======================================================================
+      // Collection 2: /users/{userId}/private/{infoId} (PII Isolation)
+      // =======================================================================
+      match /private/{infoId} {
+        allow get: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(infoId) &&
+          (resource == null || existing().uid == request.auth.uid) &&
+          isParentUserValid(userId);
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(infoId) &&
+          isValidUserPrivateInfo(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if (
+          isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(infoId) &&
+          isValidUserPrivateInfo(incoming(), userId) &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentUserValid(userId) &&
+          (
+            // Action: Update email
+            incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt'])
+          )
+        );
+
+        allow delete: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(infoId) &&
+          existing().uid == request.auth.uid &&
+          isParentUserValid(userId);
+      }
+
+      // =======================================================================
+      // Collection 3: /users/{userId}/lectures/{lectureId}
+      // =======================================================================
+      match /lectures/{lectureId} {
+        allow get: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(lectureId) &&
+          (resource == null || existing().ownerId == request.auth.uid) &&
+          isParentUserValid(userId);
+
+        allow list: if isOwner(userId) &&
+          resource.data.ownerId == request.auth.uid;
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(lectureId) &&
+          isValidLectureDoc(incoming(), userId, lectureId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isParentUserValid(userId);
+
+        allow update: if (
+          isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(lectureId) &&
+          isValidLectureDoc(incoming(), userId, lectureId) &&
+          incoming().id == existing().id &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isParentUserValid(userId) &&
+          (
+            // Action: Update lecture notes, title, metadata, or clear audio cache
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'subject', 'lecturer', 'audioFileName', 'tags',
+              'summaryMarkdown', 'transcriptText', 'formulasLatex', 'updatedAt'
+            ])
+          )
+        );
+
+        allow delete: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(lectureId) &&
+          existing().ownerId == request.auth.uid &&
+          isParentUserValid(userId);
+
+        // =====================================================================
+        // Collection 4: /users/{userId}/lectures/{lectureId}/tasks/{taskId}
+        // =====================================================================
+        match /tasks/{taskId} {
+          allow get: if isOwner(userId) &&
+            isValidId(userId) &&
+            isValidId(lectureId) &&
+            isValidId(taskId) &&
+            (resource == null || (existing().ownerId == request.auth.uid && existing().lectureId == lectureId)) &&
+            isParentLectureValid(userId, lectureId);
+
+          allow list: if isOwner(userId) &&
+            resource.data.ownerId == request.auth.uid &&
+            resource.data.lectureId == lectureId;
+
+          allow create: if isOwner(userId) &&
+            isValidId(userId) &&
+            isValidId(lectureId) &&
+            isValidId(taskId) &&
+            isValidTaskDoc(incoming(), userId, lectureId, taskId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time &&
+            isParentLectureValid(userId, lectureId);
+
+          allow update: if (
+            isOwner(userId) &&
+            isValidId(userId) &&
+            isValidId(lectureId) &&
+            isValidId(taskId) &&
+            isValidTaskDoc(incoming(), userId, lectureId, taskId) &&
+            incoming().id == existing().id &&
+            incoming().lectureId == existing().lectureId &&
+            incoming().ownerId == existing().ownerId &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            isParentLectureValid(userId, lectureId) &&
+            (
+              // Action 1: Toggle completion state
+              incoming().diff(existing()).affectedKeys().hasOnly(['completed', 'updatedAt']) ||
+              // Action 2: Edit task details
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'task', 'deadline', 'dateISO', 'type', 'completed', 'priority', 'updatedAt'
+              ])
+            )
+          );
+
+          allow delete: if isOwner(userId) &&
+            isValidId(userId) &&
+            isValidId(lectureId) &&
+            isValidId(taskId) &&
+            existing().ownerId == request.auth.uid &&
+            existing().lectureId == lectureId &&
+            isParentLectureValid(userId, lectureId);
+        }
+      }
+    }
+  }
+}

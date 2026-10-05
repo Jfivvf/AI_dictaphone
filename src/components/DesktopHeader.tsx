@@ -1,55 +1,43 @@
 import React from 'react';
-import { 
-  User,
-  Sparkles,
-  FileCode
+import {
+  FileCode,
+  LogOut,
+  LogIn
 } from 'lucide-react';
 import { AppSettings } from '../types';
+import { AxolotlLogo } from './AxolotlLogo';
 
 interface DesktopHeaderProps {
   settings: AppSettings;
   onOpenPySideCode: () => void;
   onNavigateToAccount: () => void;
   activeTab: string;
+  userEmail?: string | null;
+  userPhotoUrl?: string | null;
+  isAuthenticated?: boolean;
+  onSignOut?: () => void;
+  onRequireSignIn?: () => void;
 }
 
 export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
   settings,
   onOpenPySideCode,
   onNavigateToAccount,
+  isAuthenticated,
+  onSignOut,
+  onRequireSignIn,
 }) => {
   return (
     <header className="h-14 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between px-4 select-none shrink-0">
-      {/* Zone 1: Window controls + Clean Brand Wordmark */}
-      <div className="flex items-center gap-3">
-        {/* Window Controls */}
-        <div className="flex items-center gap-1.5 mr-2">
-          <div className="w-3 h-3 rounded-full bg-rose-500/80 hover:bg-rose-500 transition-colors cursor-pointer" title="Закрыть" />
-          <div className="w-3 h-3 rounded-full bg-amber-500/80 hover:bg-amber-500 transition-colors cursor-pointer" title="Свернуть" />
-          <div className="w-3 h-3 rounded-full bg-emerald-500/80 hover:bg-emerald-500 transition-colors cursor-pointer" title="Развернуть" />
-        </div>
-
-        <div className="h-4 w-px bg-neutral-800" />
-
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400 font-bold text-sm">
-            <Sparkles className="w-4 h-4" />
-          </div>
-          <span className="font-semibold text-neutral-100 text-sm tracking-tight whitespace-nowrap">
-            Lectura AI
-          </span>
-          <span className="text-xs text-neutral-400 hidden sm:inline">
-            Учебный диктофон
-          </span>
-        </div>
+      {/* Brand Logo + AxAI Name (click logo to upload exact custom image file) */}
+      <div className="flex items-center gap-2.5">
+        <AxolotlLogo className="w-8 h-8 rounded-lg shadow-sm" allowUploadOnClick={true} />
+        <span className="font-bold text-white text-base tracking-tight whitespace-nowrap">
+          AxAI
+        </span>
       </div>
 
-      {/* Zone 2: Empty / Clean Center */}
-      <div className="hidden md:block text-xs text-neutral-500">
-        Учебные конспекты и дедлайны
-      </div>
-
-      {/* Zone 3: Primary Actions */}
+      {/* Primary Actions & Auth Controls */}
       <div className="flex items-center gap-2">
         <button
           onClick={onOpenPySideCode}
@@ -62,15 +50,33 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
         <button
           onClick={onNavigateToAccount}
           className="flex items-center gap-2 pl-2 pr-3 py-1 rounded-lg bg-neutral-800/60 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 text-xs transition-colors"
-          title="Открыть профиль"
+          title="Открыть профиль студента"
         >
-          <div className="w-6 h-6 rounded-full bg-indigo-600/40 text-indigo-300 font-semibold flex items-center justify-center text-xs">
-            <User className="w-3.5 h-3.5" />
-          </div>
-          <span className="font-medium max-w-[120px] truncate hidden sm:inline">
+          <AxolotlLogo className="w-6 h-6 rounded-full" allowUploadOnClick={false} />
+          <span className="font-medium max-w-[130px] truncate hidden sm:inline">
             {settings.student.name.split(' ')[0]} ({settings.student.group})
           </span>
         </button>
+
+        {isAuthenticated ? (
+          <button
+            onClick={onSignOut}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/70 border border-rose-800/60 text-rose-200 text-xs font-medium transition-colors"
+            title="Выйти из аккаунта"
+          >
+            <LogOut className="w-3.5 h-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Выйти</span>
+          </button>
+        ) : (
+          <button
+            onClick={onRequireSignIn}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
+            title="Войти в аккаунт"
+          >
+            <LogIn className="w-3.5 h-3.5" />
+            <span>Войти</span>
+          </button>
+        )}
       </div>
     </header>
   );

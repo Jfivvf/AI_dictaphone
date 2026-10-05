@@ -17,14 +17,22 @@ import {
   FileCode,
   ArrowLeft,
   Share2,
-  Trash2
+  Trash2,
+  Sparkles
 } from 'lucide-react';
 import { Lecture, ActionItem } from '../types';
 import { LatexRenderer, SingleFormula } from './LatexRenderer';
+import {
+  exportLectureToMarkdown,
+  exportLectureToLatex,
+  exportLectureToPdf,
+  repairCorruptedLatex,
+} from '../utils/exportHelpers';
 
 interface LectureViewerProps {
   lecture: Lecture | null;
   onUpdateLecture: (updated: Lecture) => void;
+  onChangeTaskPriority?: (lectureId: string, taskId: string, priority: 'high' | 'medium' | 'low') => void;
   onBackToHistory: () => void;
   onNavigateToRecorder: () => void;
   onDeleteLecture?: (lectureId: string) => void;
@@ -33,6 +41,7 @@ interface LectureViewerProps {
 export const LectureViewer: React.FC<LectureViewerProps> = ({
   lecture,
   onUpdateLecture,
+  onChangeTaskPriority,
   onBackToHistory,
   onNavigateToRecorder,
   onDeleteLecture,
@@ -42,6 +51,8 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
   const [isEditingMarkdown, setIsEditingMarkdown] = useState(false);
   const [editedMarkdown, setEditedMarkdown] = useState(lecture?.summaryMarkdown || '');
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+  const [isExpandingNote, setIsExpandingNote] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   if (!lecture) {
     return (
@@ -85,74 +96,59 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
     setIsEditingMarkdown(false);
   };
 
+  // Expand lecture notes deeply with AI
+  const handleExpandLecture = async () => {
+    if (isExpandingNote) return;
+    setIsExpandingNote(true);
+    try {
+      const transcriptText = lecture.transcript.map(s => s.text).join('\n');
+      const response = await fetch('/api/expand-lecture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: lecture.title,
+          subject: lecture.subject,
+          summaryMarkdown: lecture.summaryMarkdown,
+          transcriptText
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.summaryMarkdown) {
+          onUpdateLecture({
+            ...lecture,
+            summaryMarkdown: String(data.summaryMarkdown).slice(0, 100000)
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Failed to expand lecture:', err);
+    } finally {
+      setIsExpandingNote(false);
+    }
+  };
+
   // Export as Markdown .md file download
   const handleExportMarkdown = () => {
-    let mdContent = `# ${lecture.title}\n`;
-    mdContent += `**Предмет:** ${lecture.subject}  \n`;
-    mdContent += `**Преподаватель:** ${lecture.lecturer}  \n`;
-    mdContent += `**Дата:** ${lecture.date}  \n\n`;
-    mdContent += `---\n\n`;
-    mdContent += `${lecture.summaryMarkdown}\n\n`;
-    if (lecture.actionItems.length > 0) {
-      mdContent += `## Задачи и дедлайны\n`;
-      lecture.actionItems.forEach(item => {
-        mdContent += `- [${item.completed ? 'x' : ' '}] **${item.task}** (Срок: ${item.deadline})\n`;
-      });
-    }
-
-    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${lecture.title.replace(/\s+/g, '_')}_конспект.md`;
-    link.click();
-    URL.revokeObjectURL(url);
+    exportLectureToMarkdown(lecture);
   };
 
   // Export as LaTeX .tex file download
   const handleExportLatex = () => {
-    let texContent = `\\documentclass[12pt,a4paper]{article}\n`;
-    texContent += `\\usepackage[utf8]{inputenc}\n`;
-    texContent += `\\usepackage[russian]{babel}\n`;
-    texContent += `\\usepackage{amsmath,amssymb,amsfonts}\n`;
-    texContent += `\\usepackage{hyperref}\n\n`;
-    texContent += `\\title{${lecture.title}}\n`;
-    texContent += `\\author{${lecture.lecturer} \\\\ \\small ${lecture.subject}}\n`;
-    texContent += `\\date{${lecture.date}}\n\n`;
-    texContent += `\\begin{document}\n`;
-    texContent += `\\maketitle\n\n`;
-    texContent += `\\section*{Конспект лекции}\n`;
-    
-    if (lecture.latexFormulas.length > 0) {
-      texContent += `\\section*{Формулы}\n`;
-      lecture.latexFormulas.forEach(f => {
-        texContent += `\\subsection*{${f.title}}\n`;
-        texContent += `\\begin{equation}\n${f.latex}\n\\end{equation}\n\n`;
-      });
-    }
-
-    if (lecture.actionItems.length > 0) {
-      texContent += `\\section*{Задачи и дедлайны}\n\\begin{itemize}\n`;
-      lecture.actionItems.forEach(item => {
-        texContent += `\\item \\textbf{${item.task}} --- \\textit{Дедлайн: ${item.deadline}}\n`;
-      });
-      texContent += `\\end{itemize}\n\n`;
-    }
-
-    texContent += `\\end{document}`;
-
-    const blob = new Blob([texContent], { type: 'text/plain;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${lecture.title.replace(/\s+/g, '_')}.tex`;
-    link.click();
-    URL.revokeObjectURL(url);
+    exportLectureToLatex(lecture);
   };
 
-  // Export to PDF via browser print
-  const handlePrintPDF = () => {
-    window.print();
+  // Export to downloadable PDF file
+  const handlePrintPDF = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
+    try {
+      await exportLectureToPdf(lecture);
+    } catch (err) {
+      console.error('PDF export error:', err);
+    } finally {
+      setIsExportingPdf(false);
+    }
   };
 
   // Filter transcript segments
@@ -207,11 +203,12 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handlePrintPDF}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 text-xs font-medium transition-colors"
-              title="Экспортировать или напечатать в PDF"
+              disabled={isExportingPdf}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 text-xs font-medium transition-colors disabled:opacity-50"
+              title="Скачать готовый PDF-документ с формулами"
             >
               <Printer className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Печать / PDF</span>
+              <span>{isExportingPdf ? 'Сборка PDF...' : 'Скачать PDF'}</span>
             </button>
 
             <button
@@ -298,34 +295,46 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
             <div className="space-y-6">
               
               {/* Toolbar for editing notes */}
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-medium text-neutral-400">
                   Конспект занятия с формулами и определениями
                 </span>
 
-                <button
-                  onClick={() => {
-                    if (isEditingMarkdown) {
-                      handleSaveMarkdown();
-                    } else {
-                      setEditedMarkdown(lecture.summaryMarkdown);
-                      setIsEditingMarkdown(true);
-                    }
-                  }}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs text-neutral-300 font-medium transition-colors"
-                >
-                  {isEditingMarkdown ? (
-                    <>
-                      <Save className="w-3.5 h-3.5 text-emerald-400" />
-                      Сохранить
-                    </>
-                  ) : (
-                    <>
-                      <Edit3 className="w-3.5 h-3.5 text-neutral-400" />
-                      Редактировать
-                    </>
-                  )}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleExpandLecture}
+                    disabled={isExpandingNote || isEditingMarkdown}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-xs text-indigo-300 font-medium transition-colors disabled:opacity-50"
+                    title="Развернуть конспект в 3–4 раза подробнее с выводом формул, примерами и вопросами к экзамену"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 text-indigo-400 ${isExpandingNote ? 'animate-spin' : ''}`} />
+                    <span>{isExpandingNote ? 'Генерация подробного конспекта...' : 'Сделать подробнее (ИИ)'}</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (isEditingMarkdown) {
+                        handleSaveMarkdown();
+                      } else {
+                        setEditedMarkdown(repairCorruptedLatex(lecture.summaryMarkdown));
+                        setIsEditingMarkdown(true);
+                      }
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs text-neutral-300 font-medium transition-colors"
+                  >
+                    {isEditingMarkdown ? (
+                      <>
+                        <Save className="w-3.5 h-3.5 text-emerald-400" />
+                        Сохранить
+                      </>
+                    ) : (
+                      <>
+                        <Edit3 className="w-3.5 h-3.5 text-neutral-400" />
+                        Редактировать
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* Rendered Container */}
@@ -437,9 +446,43 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
 
                           <span aria-hidden="true">·</span>
 
-                          <span className={task.priority === 'high' ? 'text-rose-400 font-medium' : 'text-neutral-400'}>
-                            {task.priority === 'high' ? 'Высокий приоритет' : 'Обычный'}
-                          </span>
+                          <label
+                            className="inline-flex items-center gap-1.5"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className="text-neutral-500">Приоритет:</span>
+                            <select
+                              value={task.priority}
+                              onChange={(e) => {
+                                const newPriority = e.target.value as 'high' | 'medium' | 'low';
+                                if (onChangeTaskPriority) {
+                                  onChangeTaskPriority(lecture.id, task.id, newPriority);
+                                } else {
+                                  const updatedTasks = lecture.actionItems.map((t) =>
+                                    t.id === task.id ? { ...t, priority: newPriority } : t
+                                  );
+                                  onUpdateLecture({ ...lecture, actionItems: updatedTasks });
+                                }
+                              }}
+                              className={`px-2 py-0.5 rounded-md text-[11px] font-medium border cursor-pointer focus:outline-none transition-colors ${
+                                task.priority === 'high'
+                                  ? 'bg-rose-950/60 border-rose-800/70 text-rose-300'
+                                  : task.priority === 'medium'
+                                  ? 'bg-amber-950/50 border-amber-800/60 text-amber-300'
+                                  : 'bg-neutral-800 border-neutral-700 text-neutral-300'
+                              }`}
+                            >
+                              <option value="high" className="bg-neutral-900 text-rose-300">
+                                Высокий
+                              </option>
+                              <option value="medium" className="bg-neutral-900 text-amber-300">
+                                Обычный
+                              </option>
+                              <option value="low" className="bg-neutral-900 text-neutral-300">
+                                Низкий
+                              </option>
+                            </select>
+                          </label>
                         </div>
                       </div>
                     </div>

@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import katex from 'katex';
+import { repairCorruptedLatex } from '../utils/exportHelpers';
 
 interface LatexRendererProps {
   content: string;
@@ -11,8 +12,9 @@ export const LatexRenderer: React.FC<LatexRendererProps> = ({ content, className
   const renderedElements = useMemo(() => {
     if (!content) return null;
 
+    const cleanContent = repairCorruptedLatex(content);
     // Split content by block math $$...$$
-    const lines = content.split('\n');
+    const lines = cleanContent.split('\n');
     const elements: React.ReactNode[] = [];
     let inBlockMath = false;
     let blockMathAccumulator = '';
@@ -224,19 +226,20 @@ interface SingleFormulaProps {
 }
 
 export const SingleFormula: React.FC<SingleFormulaProps> = ({ latex, displayMode = true }) => {
+  const cleanLatex = useMemo(() => repairCorruptedLatex(latex), [latex]);
   const html = useMemo(() => {
     try {
-      return katex.renderToString(latex, {
+      return katex.renderToString(cleanLatex, {
         displayMode,
         throwOnError: false,
       });
     } catch {
       return null;
     }
-  }, [latex, displayMode]);
+  }, [cleanLatex, displayMode]);
 
   if (!html) {
-    return <code className="text-amber-400 font-mono text-xs">{latex}</code>;
+    return <code className="text-amber-400 font-mono text-xs">{cleanLatex}</code>;
   }
 
   return (

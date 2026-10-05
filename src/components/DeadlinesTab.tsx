@@ -2,27 +2,31 @@ import React, { useState } from 'react';
 import { 
   Calendar, 
   CheckSquare, 
-  Clock, 
-  Filter, 
   Plus, 
-  AlertCircle, 
   BookOpen, 
   Check, 
-  ChevronRight,
-  Sparkles
+  ChevronRight
 } from 'lucide-react';
 import { Lecture, ActionItem } from '../types';
 
 interface DeadlinesTabProps {
   lectures: Lecture[];
   onToggleTask: (lectureId: string, taskId: string) => void;
+  onChangeTaskPriority?: (lectureId: string, taskId: string, priority: 'high' | 'medium' | 'low') => void;
   onOpenLecture: (lectureId: string) => void;
   onAddNewTask: (task: ActionItem, lectureId?: string) => void;
 }
 
+const PRIORITY_WEIGHT: Record<'high' | 'medium' | 'low', number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
 export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
   lectures,
   onToggleTask,
+  onChangeTaskPriority,
   onOpenLecture,
   onAddNewTask,
 }) => {
@@ -47,14 +51,23 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
   // Extract unique subjects
   const subjects = ['all', ...Array.from(new Set(allTasksWithLecture.map(t => t.lectureSubject)))];
 
-  // Filter tasks
-  const filteredTasks = allTasksWithLecture.filter(item => {
-    const matchesSubject = filterSubject === 'all' || item.lectureSubject === filterSubject;
-    const matchesStatus = 
-      filterStatus === 'all' ? true :
-      filterStatus === 'pending' ? !item.completed : item.completed;
-    return matchesSubject && matchesStatus;
-  });
+  // Filter and sort tasks (highest priority first)
+  const filteredTasks = allTasksWithLecture
+    .filter(item => {
+      const matchesSubject = filterSubject === 'all' || item.lectureSubject === filterSubject;
+      const matchesStatus = 
+        filterStatus === 'all' ? true :
+        filterStatus === 'pending' ? !item.completed : item.completed;
+      return matchesSubject && matchesStatus;
+    })
+    .sort((a, b) => {
+      if (a.completed !== b.completed) {
+        return a.completed ? 1 : -1;
+      }
+      const weightA = PRIORITY_WEIGHT[a.priority] || 2;
+      const weightB = PRIORITY_WEIGHT[b.priority] || 2;
+      return weightB - weightA;
+    });
 
   const pendingCount = allTasksWithLecture.filter(t => !t.completed).length;
   const completedCount = allTasksWithLecture.filter(t => t.completed).length;
@@ -65,7 +78,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
 
     const targetLecture = lectures.find(l => l.subject === newTaskSubject) || lectures[0];
     const newTask: ActionItem = {
-      id: `custom-task-${Date.now()}`,
+      id: `custom_task_${Date.now()}`,
       task: newTaskText,
       deadline: newTaskDeadline || 'В ближайшее время',
       dateISO: new Date().toISOString().split('T')[0],
@@ -91,7 +104,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
               Задачи и дедлайны
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
-              Все домашние задания, даты коллоквиумов и сдачи работ, извлеченные из записей
+              Домашние задания, даты коллоквиумов и сдачи работ (отсортированы по приоритету)
             </p>
           </div>
 
@@ -127,7 +140,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
             <div className="text-2xl font-bold font-mono text-white">
               {allTasksWithLecture.length}
             </div>
-            <div className="text-[11px] text-neutral-500 mt-0.5">Задачи из аудиозаписей</div>
+            <div className="text-[11px] text-neutral-500 mt-0.5">Задачи из записей и файлов</div>
           </div>
         </div>
 
@@ -226,7 +239,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
                       {item.task}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px] text-neutral-400">
+                    <div className="flex flex-wrap items-center gap-2 mt-2 text-[11px] text-neutral-400">
                       <span className="font-semibold text-indigo-400">
                         {item.lectureSubject}
                       </span>
@@ -236,9 +249,39 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
                         Срок: {item.deadline}
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span className={item.priority === 'high' ? 'text-rose-400 font-medium' : 'text-neutral-400'}>
-                        {item.priority === 'high' ? 'Высокий приоритет' : 'Обычный'}
-                      </span>
+
+                      {/* Interactive Priority Selector */}
+                      <label className="inline-flex items-center gap-1.5">
+                        <span className="text-neutral-500">Приоритет:</span>
+                        <select
+                          value={item.priority}
+                          onChange={(e) =>
+                            onChangeTaskPriority?.(
+                              item.lectureId,
+                              item.id,
+                              e.target.value as 'high' | 'medium' | 'low'
+                            )
+                          }
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-medium border cursor-pointer focus:outline-none transition-colors ${
+                            item.priority === 'high'
+                              ? 'bg-rose-950/60 border-rose-800/70 text-rose-300'
+                              : item.priority === 'medium'
+                              ? 'bg-amber-950/50 border-amber-800/60 text-amber-300'
+                              : 'bg-neutral-800 border-neutral-700 text-neutral-300'
+                          }`}
+                          title="Нажмите, чтобы изменить приоритет задачи"
+                        >
+                          <option value="high" className="bg-neutral-900 text-rose-300">
+                            Высокий
+                          </option>
+                          <option value="medium" className="bg-neutral-900 text-amber-300">
+                            Обычный
+                          </option>
+                          <option value="low" className="bg-neutral-900 text-neutral-300">
+                            Низкий
+                          </option>
+                        </select>
+                      </label>
                     </div>
                   </div>
                 </div>
@@ -272,6 +315,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
                   <input
                     type="text"
                     value={newTaskText}
+                    maxLength={1000}
                     onChange={(e) => setNewTaskText(e.target.value)}
                     placeholder="Например: Сдать типовой расчет № 2"
                     required
@@ -286,6 +330,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
                   <input
                     type="text"
                     value={newTaskDeadline}
+                    maxLength={200}
                     onChange={(e) => setNewTaskDeadline(e.target.value)}
                     placeholder="Например: Пятница, 18:00"
                     className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
@@ -314,7 +359,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
                     </label>
                     <select
                       value={newTaskPriority}
-                      onChange={(e) => setNewTaskPriority(e.target.value as unknown as 'high')}
+                      onChange={(e) => setNewTaskPriority(e.target.value as 'high' | 'medium' | 'low')}
                       className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
                     >
                       <option value="high">Высокий</option>
