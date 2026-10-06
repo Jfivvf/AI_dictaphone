@@ -1,8 +1,17 @@
 import React, { useState } from 'react';
 import {
-  AlertCircle
+  AlertCircle,
+  CheckCircle2,
+  Mail,
+  Lock,
+  User
 } from 'lucide-react';
-import { signInWithGooglePopup } from '../firebase';
+import {
+  signInWithGooglePopup,
+  signInWithEmail,
+  registerWithEmail,
+  resetPasswordForEmail,
+} from '../firebase';
 import { AxolotlLogo } from './AxolotlLogo';
 
 interface AuthScreenProps {
@@ -12,21 +21,99 @@ interface AuthScreenProps {
 export const AuthScreen: React.FC<AuthScreenProps> = ({ onContinueOffline }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [emailMode, setEmailMode] = useState<'login' | 'register'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [studentName, setStudentName] = useState('');
 
   const handleGoogleSignIn = async () => {
     setIsLoading(true);
     setErrorMsg(null);
+    setInfoMsg(null);
     try {
       await signInWithGooglePopup();
     } catch (err: any) {
-      console.error('Sign in error:', err);
       if (err?.code === 'auth/popup-closed-by-user') {
-        setErrorMsg('Окно входа было закрыто до завершения авторизации.');
+        setErrorMsg('Окно входа было закрыто. Вы также можете войти по почте и паролю ниже.');
       } else if (err?.code === 'auth/popup-blocked') {
-        setErrorMsg('Браузер заблокировал всплывающее окно входа. Разрешите всплывающие окна для этого сайта.');
+        setErrorMsg('Браузер заблокировал всплывающее окно. Разрешите всплывающие окна или войдите по почте и паролю.');
+      } else if (err?.code === 'auth/unauthorized-domain') {
+        setErrorMsg(
+          'Домен localhost еще не добавлен в разрешенные домены Firebase (Authentication → Settings → Authorized domains).'
+        );
       } else {
         setErrorMsg(err?.message || 'Не удалось выполнить вход. Попробуйте снова.');
       }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleEmailAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password) return;
+
+    setIsLoading(true);
+    setErrorMsg(null);
+    setInfoMsg(null);
+    try {
+      if (emailMode === 'login') {
+        await signInWithEmail(email, password);
+      } else {
+        await registerWithEmail(email, password, studentName);
+      }
+    } catch (err: any) {
+      if (
+        err?.code === 'auth/invalid-credential' ||
+        err?.code === 'auth/user-not-found' ||
+        err?.code === 'auth/wrong-password'
+      ) {
+        if (emailMode === 'register') {
+          setEmailMode('login');
+          setErrorMsg(
+            'Этот email уже привязан к аккаунту (например, через вход Google). Войдите через Google выше или нажмите «Задать / сбросить пароль на почту» ниже.'
+          );
+        } else {
+          setErrorMsg(
+            'Неверный email или пароль. Если вы еще не создавали аккаунт с этой почтой — переключитесь на вкладку «Регистрация», либо нажмите «Задать / сбросить пароль на почту».'
+          );
+        }
+      } else if (err?.code === 'auth/email-already-in-use') {
+        setEmailMode('login');
+        setErrorMsg(
+          'Эта почта уже зарегистрирована. Введите ваш пароль во вкладке «Вход» или нажмите «Задать / сбросить пароль на почту».'
+        );
+      } else if (err?.code === 'auth/weak-password') {
+        setErrorMsg('Пароль должен содержать не менее 6 символов.');
+      } else if (err?.code === 'auth/operation-not-allowed') {
+        setErrorMsg(
+          'Вход по почте и паролю нужно включить в Firebase Console: Authentication → Sign-in method → Email/Password → Enable.'
+        );
+      } else {
+        setErrorMsg(err?.message || 'Ошибка авторизации по почте и паролю.');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    if (!email.trim()) {
+      setErrorMsg('Введите ваш Email в поле почты, чтобы получить ссылку для установки пароля.');
+      return;
+    }
+    setIsLoading(true);
+    setErrorMsg(null);
+    setInfoMsg(null);
+    try {
+      await resetPasswordForEmail(email);
+      setInfoMsg(
+        `Письмо со ссылкой для установки / сброса пароля отправлено на ${email.trim()}. Проверьте «Входящие» и «Спам».`
+      );
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Не удалось отправить письмо для сброса пароля.');
     } finally {
       setIsLoading(false);
     }
@@ -64,8 +151,15 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onContinueOffline }) => 
             </div>
           )}
 
-          {/* Primary Google Sign-In / Registration Button */}
+          {infoMsg && (
+            <div className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-800/80 text-emerald-200 text-xs flex items-start gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <span>{infoMsg}</span>
+            </div>
+          )}
+
           <div className="space-y-3">
+            {/* 1. Вход через Google */}
             <button
               type="button"
               onClick={handleGoogleSignIn}
@@ -90,16 +184,127 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onContinueOffline }) => 
                   d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
                 />
               </svg>
-              <span>{isLoading ? 'Выполняется вход...' : 'Войти / Зарегистрироваться через Google'}</span>
+              <span>{isLoading ? 'Выполняется вход...' : 'Войти через Google'}</span>
             </button>
 
+            {/* 2. Вход / Регистрация через почту и пароль */}
+            {!showEmailForm ? (
+              <button
+                type="button"
+                onClick={() => setShowEmailForm(true)}
+                disabled={isLoading}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-all shadow-sm cursor-pointer"
+              >
+                <Mail className="w-4 h-4" />
+                <span>Войти / Зарегистрироваться по почте и паролю</span>
+              </button>
+            ) : (
+              <form
+                onSubmit={handleEmailAuth}
+                className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3"
+              >
+                <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-neutral-900 border border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailMode('login');
+                      setErrorMsg(null);
+                      setInfoMsg(null);
+                    }}
+                    className={`py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      emailMode === 'login'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    Вход
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailMode('register');
+                      setErrorMsg(null);
+                      setInfoMsg(null);
+                    }}
+                    className={`py-1.5 rounded-md text-xs font-medium transition-colors ${
+                      emailMode === 'register'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    Регистрация
+                  </button>
+                </div>
+
+                {emailMode === 'register' && (
+                  <div className="relative">
+                    <User className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={studentName}
+                      onChange={(e) => setStudentName(e.target.value)}
+                      placeholder="Ваше имя и фамилия"
+                      className="w-full pl-9 pr-3 py-2 text-xs bg-neutral-900 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                )}
+
+                <div className="relative">
+                  <Mail className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-2.5" />
+                  <input
+                    type="email"
+                    required
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="Электронная почта (Email)"
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-neutral-900 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="relative">
+                  <Lock className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-2.5" />
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Пароль (минимум 6 символов)"
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-neutral-900 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoading}
+                  className="w-full py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {isLoading
+                    ? 'Подождите...'
+                    : emailMode === 'login'
+                    ? 'Войти по почте и паролю'
+                    : 'Создать аккаунт'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handlePasswordReset}
+                  disabled={isLoading}
+                  className="w-full text-center text-[11px] text-indigo-400 hover:text-indigo-300 transition-colors pt-1 cursor-pointer"
+                >
+                  Задать или сбросить пароль на почту
+                </button>
+              </form>
+            )}
+
+            {/* 3. Продолжить без аккаунта */}
             {onContinueOffline && (
               <button
                 type="button"
                 onClick={onContinueOffline}
-                className="w-full py-2.5 rounded-xl bg-neutral-800/70 hover:bg-neutral-800 border border-neutral-700/70 text-neutral-300 text-xs font-medium transition-colors"
+                className="w-full py-2.5 rounded-xl bg-neutral-800/70 hover:bg-neutral-800 border border-neutral-700/70 text-neutral-300 text-xs font-medium transition-colors cursor-pointer"
               >
-                Продолжить локально без облачной синхронизации
+                Продолжить без аккаунта
               </button>
             )}
           </div>

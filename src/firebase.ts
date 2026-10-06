@@ -3,6 +3,10 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  updateProfile,
   signOut as firebaseSignOut,
   User as FirebaseUser
 } from 'firebase/auth';
@@ -634,6 +638,37 @@ export function mapDocToLecture(docId: string, data: Record<string, any>, tasks:
 export async function signInWithGooglePopup(): Promise<FirebaseUser> {
   const result = await signInWithPopup(auth, googleProvider);
   return result.user;
+}
+
+export async function signInWithEmail(email: string, password: string): Promise<FirebaseUser> {
+  const result = await signInWithEmailAndPassword(auth, email.trim(), password);
+  return result.user;
+}
+
+export async function registerWithEmail(
+  email: string,
+  password: string,
+  displayName?: string
+): Promise<FirebaseUser> {
+  const cleanEmail = email.trim();
+  try {
+    const result = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+    if (displayName && displayName.trim()) {
+      await updateProfile(result.user, { displayName: displayName.trim() });
+    }
+    return result.user;
+  } catch (err: any) {
+    // If email is already registered, automatically try signing in with the provided password
+    if (err?.code === 'auth/email-already-in-use') {
+      const signInResult = await signInWithEmailAndPassword(auth, cleanEmail, password);
+      return signInResult.user;
+    }
+    throw err;
+  }
+}
+
+export async function resetPasswordForEmail(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim());
 }
 
 export async function signOutUser(): Promise<void> {

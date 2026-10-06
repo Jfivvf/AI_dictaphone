@@ -1,78 +1,25 @@
 """
 AxAI — Десктопное приложение на Python + PySide6 (1-в-1 с веб-версией)
 Использует PySide6 QMainWindow + QWebEngineView для отображения интерфейса AxAI
-со всеми формулами KaTeX, базой Firebase Firestore, записью микрофона и экспортом PDF/MD/TEX.
+со всеми формулами KaTeX, базой Firebase Firestore, записью микрофона,
+поддержкой всплывающих окон OAuth-авторизации Google (createWindow) и экспортом PDF/MD/TEX.
 
-Запуск из корня проекта или из папки python_desktop:
-    pip install PySide6 PySide6-Addons
+Запуск из корня проекта:
     python python_desktop/axai_webview_desktop.py
 """
 import os
 import sys
-import time
 import socket
 import subprocess
 from PySide6.QtCore import QUrl, Qt, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QBrush
-from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QMessageBox
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QFileDialog, QMessageBox, QDialog, QVBoxLayout
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineDownloadRequest
-
-
-def create_axolotl_window_icon() -> QIcon:
-    """Создает иконку розового аксолотля AxAI для заголовка окна и панели задач."""
-    pixmap = QPixmap(120, 120)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-
-    # Нежно-голубой скругленный фон
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#B3D7EE"))
-    painter.drawRoundedRect(0, 0, 120, 120, 26, 26)
-
-    pen = QPen(QColor("#111111"), 3.2)
-    painter.setPen(pen)
-
-    # Жабры
-    painter.setBrush(QColor("#E97486"))
-    painter.drawEllipse(14, 34, 24, 10)
-    painter.drawEllipse(12, 46, 24, 10)
-    painter.drawEllipse(14, 58, 24, 10)
-    painter.drawEllipse(82, 34, 24, 10)
-    painter.drawEllipse(84, 46, 24, 10)
-    painter.drawEllipse(82, 58, 24, 10)
-
-    # Тело аксолотля
-    painter.setBrush(QColor("#F8BAC2"))
-    painter.drawRoundedRect(30, 28, 60, 68, 28, 28)
-
-    # Животик
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#FBE5C8"))
-    painter.drawEllipse(42, 64, 34, 28)
-
-    # Круглые очки
-    painter.setPen(QPen(QColor("#111111"), 3.2))
-    painter.setBrush(QColor(251, 208, 214, 120))
-    painter.drawEllipse(36, 41, 20, 20)
-    painter.drawEllipse(62, 41, 20, 20)
-    painter.drawLine(56, 51, 62, 51)
-
-    # Глазки
-    painter.setBrush(QColor("#111111"))
-    painter.drawEllipse(44, 49, 5, 5)
-    painter.drawEllipse(70, 49, 5, 5)
-
-    # Ручка в лапках
-    painter.setBrush(QColor("#FFFFFF"))
-    painter.drawPolygon([
-        pixmap.rect().topLeft() + Qt.QPoint(42, 62) if hasattr(Qt, "QPoint") else None
-    ][:0])
-    painter.drawLine(43, 62, 60, 88)
-
-    painter.end()
-    return QIcon(pixmap)
+from PySide6.QtWebEngineCore import (
+    QWebEnginePage, QWebEngineProfile, QWebEngineDownloadRequest, QWebEngineSettings
+)
 
 
 def is_port_in_use(port: int = 3000) -> bool:
@@ -82,29 +29,43 @@ def is_port_in_use(port: int = 3000) -> bool:
 
 
 class AxAIWebPage(QWebEnginePage):
-    """Разрешает автоматический доступ к микрофону и всплывающим окнам авторизации."""
-    def __init__(self, profile: QWebEngineProfile, parent=None):
-        super().__init__(profile, parent)
+    """
+    Кастомная страница QWebEnginePage:
+    1. Автоматически разрешает доступ к микрофону (MediaAudioCapture).
+    2. Поддерживает всплывающие окна (createWindow) для Google OAuth (signInWithPopup).
+    """
+    def __init__(self, profile: QWebEngineProfile, parent_window=None):
+        super().__init__(profile, parent_window)
+        self.parent_window = parent_window
+        self.popup_dialogs = []
         self.featurePermissionRequested.connect(self.on_feature_permission_requested)
 
     def on_feature_permission_requested(self, security_origin: QUrl, feature: QWebEnginePage.Feature):
-        if feature in (
-            QWebEnginePage.Feature.MediaAudioCapture,
-            QWebEnginePage.Feature.MediaVideoCapture,
-            QWebEnginePage.Feature.MediaAudioVideoCapture,
-            QWebEnginePage.Feature.Notifications,
-        ):
-            self.setFeaturePermission(
-                security_origin,
-                feature,
-                QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
-            )
-        else:
-            self.setFeaturePermission(
-                security_origin,
-                feature,
-                QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
-            )
+        self.setFeaturePermission(
+            security_origin,
+            feature,
+            QWebEnginePage.PermissionPolicy.PermissionGrantedByUser,
+        )
+
+    def createWindow(self, _type):
+        """Открывает дочернее окно PySide6 для входа через Google (Firebase signInWithPopup)."""
+        popup_dialog = QDialog(self.parent_window)
+        popup_dialog.setWindowTitle("Вход через аккаунт Google — AxAI")
+        popup_dialog.resize(520, 680)
+        layout = QVBoxLayout(popup_dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        popup_view = QWebEngineView(popup_dialog)
+        popup_page = AxAIWebPage(self.profile(), popup_dialog)
+        popup_view.setPage(popup_page)
+        layout.addWidget(popup_view)
+
+        # Автоматически закрываем всплывающее окно после успешного входа
+        popup_page.windowCloseRequested.connect(popup_dialog.close)
+
+        self.popup_dialogs.append(popup_dialog)
+        popup_dialog.show()
+        return popup_page
 
 
 class AxAIDesktopWindow(QMainWindow):
@@ -118,7 +79,6 @@ class AxAIDesktopWindow(QMainWindow):
         self.setMinimumSize(900, 620)
         self.setStyleSheet("QMainWindow { background-color: #0a0a0a; }")
 
-        # Если рядом лежит кастомная иконка, используем ее, иначе рисуем иконку аксолотля
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         svg_icon_path = os.path.join(project_root, "public", "axai-icon.svg")
         if os.path.exists(svg_icon_path):
@@ -136,11 +96,23 @@ class AxAIDesktopWindow(QMainWindow):
         self.profile.setPersistentCookiesPolicy(
             QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies
         )
+        # Стандартный User-Agent Chrome, чтобы Google OAuth разрешал вход во всплывающем окне
+        self.profile.setHttpUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
         self.profile.downloadRequested.connect(self.on_download_requested)
 
         self.webview = QWebEngineView(self)
-        self.page = AxAIWebPage(self.profile, self.webview)
+        self.page = AxAIWebPage(self.profile, self)
         self.webview.setPage(self.page)
+
+        # Разрешаем открытие окон JS и доступ к локальному хранилищу
+        settings = self.webview.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanOpenWindows, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
+
         self.setCentralWidget(self.webview)
 
         # Подключаемся к серверу как только он готов
