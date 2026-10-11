@@ -3,15 +3,30 @@ import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
 
-// Support audio and PDF uploads up to 50MB
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Support large payloads and chunked audio uploads
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ extended: true, limit: '150mb' }));
+
+// Temporary store for chunked audio uploads (avoids Cloud Run 32MB per-request HTTP limit on 40-90 min lectures)
+const audioChunkStore = new Map<string, { chunks: string[]; createdAt: number }>();
+
+// Cleanup stale chunk sessions older than 30 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of audioChunkStore.entries()) {
+    if (now - val.createdAt > 30 * 60 * 1000) {
+      audioChunkStore.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
 
 function createGeminiClient(apiKey: string) {
   return new GoogleGenAI({
@@ -22,6 +37,38 @@ function createGeminiClient(apiKey: string) {
       },
     },
   });
+}
+
+/**
+ * Starts an HTTP 200 JSON stream with periodic whitespace heartbeats every 4 seconds.
+ * Prevents Cloud Run / iframe proxy timeouts ("TypeError: Failed to fetch") during long AI generations.
+ */
+function startKeepAliveJsonResponse(res: express.Response) {
+  res.status(200);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const timer = setInterval(() => {
+    if (!res.writableEnded) {
+      try {
+        res.write(' ');
+      } catch {}
+    }
+  }, 4000);
+
+  return {
+    sendJson: (data: any) => {
+      clearInterval(timer);
+      if (!res.writableEnded) {
+        res.end(JSON.stringify(data));
+      }
+    },
+    stop: () => {
+      clearInterval(timer);
+    },
+  };
 }
 
 function repairLatexControlChars(val: any): any {
@@ -87,33 +134,129 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', hasKey: !!process.env.GEMINI_API_KEY });
 });
 
-// Audio transcription and structuring endpoint with automatic model fallback on 503 spikes
-app.post('/api/transcribe', async (req, res) => {
+// Receive 3MB audio chunks so 40-90 minute recordings never trigger HTTP 413 Payload Too Large
+app.post('/api/upload-audio-chunk', (req, res) => {
   try {
-    const { audioBase64, mimeType, title, subject } = req.body;
-    if (!audioBase64) {
-      return res.status(400).json({ error: 'Аудиоданные не получены' });
+    const { uploadId, chunkIndex, chunkData } = req.body;
+    if (!uploadId || typeof chunkData !== 'string') {
+      return res.status(400).json({ error: 'Некорректные данные чанка' });
     }
+    let session = audioChunkStore.get(uploadId);
+    if (!session) {
+      session = { chunks: [], createdAt: Date.now() };
+      audioChunkStore.set(uploadId, session);
+    }
+    session.chunks[Number(chunkIndex) || 0] = chunkData;
+    return res.json({ ok: true, receivedChunk: chunkIndex });
+  } catch (err: any) {
+    console.error('Chunk upload error:', err);
+    return res.status(500).json({ error: err.message || 'Ошибка загрузки чанка' });
+  }
+});
 
+// Live 2-minute segment transcription during long (>1 hour) recordings
+app.post('/api/transcribe-segment', async (req, res) => {
+  try {
+    const { audioBase64, mimeType, title, subject, aiContext } = req.body;
+    if (!audioBase64) {
+      return res.status(400).json({ error: 'Empty segment' });
+    }
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      console.warn('GEMINI_API_KEY is not set');
-      return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
+      return res.status(500).json({ error: 'GEMINI_API_KEY not set' });
     }
 
     const ai = createGeminiClient(apiKey);
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+
+    const prompt = `Ты — точный академический стенографист на университетской лекции.
+Предмет: "${subject || 'Учебная дисциплина'}". Тема: "${title || 'Лекция'}".
+${aiContext ? `Контекст и термины: "${aiContext}".` : ''}
+Дословно и без сокращений расшифруй речь лектора из этого аудиофрагмента на русском языке.
+Если в фрагменте тишина или нет речи — верни пустую строку. Верни ТОЛЬКО чистый текст расшифровки без комментариев от себя.`;
+
+    const candidateModels = [
+      'gemini-3.5-transcribe',
+      'gemini-flash-latest',
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+    ];
+
+    let segmentText = '';
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { inlineData: { mimeType: cleanMime, data: audioBase64 } },
+                { text: prompt },
+              ],
+            },
+          ],
+          config: {
+            maxOutputTokens: 2048,
+          },
+        });
+        segmentText = (response.text || '').trim();
+        if (segmentText) break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+
+    return res.json({ text: segmentText });
+  } catch (err: any) {
+    console.warn('Segment transcription error:', err);
+    return res.json({ text: '' });
+  }
+});
+
+// Audio transcription and structuring endpoint with chunked upload support & keep-alive streaming
+app.post('/api/transcribe', async (req, res) => {
+  let tempFilePath: string | null = null;
+  const { audioBase64: directBase64, uploadId, mimeType, title, subject, aiContext, liveTranscript } = req.body;
+
+  let audioBase64 = directBase64 || '';
+  if (!audioBase64 && uploadId && audioChunkStore.has(uploadId)) {
+    const session = audioChunkStore.get(uploadId)!;
+    audioBase64 = session.chunks.join('');
+    audioChunkStore.delete(uploadId);
+  }
+
+  if (!audioBase64 && !liveTranscript && !aiContext) {
+    return res.status(400).json({ error: 'Аудиоданные не получены' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    console.warn('GEMINI_API_KEY is not set');
+    return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
+  }
+
+  const streamHelper = startKeepAliveJsonResponse(res);
+
+  try {
+    const ai = createGeminiClient(apiKey);
+
+    const contextInstruction = aiContext
+      ? `\nДополнительный контекст, термины и заметки от студента (ОБЯЗАТЕЛЬНО используй для точного распознавания созвучных научных терминов, фамилий ученых, формул и структуры конспекта): "${aiContext}"\n`
+      : '';
+
+    const browserTranscriptHint = liveTranscript
+      ? `\nПострочная стенограмма, накопленная по ходу записи лекции (используй её вместе с аудиозаписью, чтобы не упустить ни одной минуты лекции): "${String(liveTranscript).slice(0, 90000)}"\n`
+      : '';
 
     const prompt = `Ты — академический ИИ-ассистент для студентов университета.
 Тема занятия: "${title || 'Без названия'}"
-Предмет: "${subject || 'Учебное занятие'}"
-
-Внимательно прослушай эту аудиозапись и выполни следующие задачи максимально подробно:
-1. segments: ПОЛНАЯ, дословная построчная расшифровка всей речи на русском языке без пропусков [{"startTime": секунды_начала, "endTime": секунды_конца, "speaker": "Лектор", "text": "фраза"}].
-2. fullText: Полный связный текст всей речи.
-3. summaryMarkdown: ОЧЕНЬ ПОДРОБНЫЙ, РАЗВЕРНУТЫЙ, ФУНДАМЕНТАЛЬНЫЙ университетский конспект лекции в формате Markdown.
+Предмет: "${subject || 'Учебное занятие'}"${contextInstruction}${browserTranscriptHint}
+Внимательно прослушай эту аудиозапись (и накопленную стенограмму) и выполни следующие задачи (отдай 80% объема ответа именно в поле summaryMarkdown):
+1. summaryMarkdown: ОЧЕНЬ ПОДРОБНЫЙ, РАЗВЕРНУТЫЙ, ФУНДАМЕНТАЛЬНЫЙ университетский конспект ВСЕЙ лекции от первой до последней минуты в формате Markdown.
    КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО делать краткую выжимку из пары абзацев!
    Конспект должен быть максимально полным и глубоким, чтобы по нему можно было готовиться к экзамену:
-   - Подробно распиши КАЖДУЮ мысль, определение, теорему, свойство и причинно-следственную связь, озвученную лектором.
+   - Подробно распиши КАЖДУЮ мысль, определение, теорему, свойство и причинно-следственную связь, озвученную лектором и указанную в контексте.
    - Если лектор упоминает понятия или формулы вскользь, разверни их и дай четкое академическое пояснение сути, физического или математического смысла и всех входящих величин.
    - Обязательно используй четкую структуру:
      ## 1. Введение и контекст темы
@@ -122,10 +265,54 @@ app.post('/api/transcribe', async (req, res) => {
      ## 4. Математический аппарат, формулы и выводы (в синтаксисе LaTeX $...$ и $$...$$ с расшифровкой всех переменных)
      ## 5. Разобранные примеры и практическое применение
      ## 6. Итоговые выводы и контрольные вопросы к экзамену (с ответами)
-4. actionItems: Все домашние задания, дедлайны, даты сдачи, коллоквиумы, лабораторные:
+2. actionItems: Все домашние задания, дедлайны, даты сдачи, коллоквиумы, лабораторные:
    [{"task": "описание задачи", "deadline": "названный срок (например 'к пятнице 18:00')", "priority": "high"|"medium"|"low"}]
-5. latexFormulas: Все формулы по теме лекции:
-   [{"title": "название формулы", "latex": "код LaTeX без знаков $", "context": "подробное пояснение величин и применения"}]`;
+3. latexFormulas: Все формулы по теме лекции:
+   [{"title": "название формулы", "latex": "код LaTeX без знаков $", "context": "подробное пояснение величин и применения"}]
+4. segments: Смысловые блоки речи с таймкодами [{"startTime": секунды_начала, "endTime": секунды_конца, "speaker": "Лектор", "text": "речь лектора"}].
+5. fullText: Связный текст речи.`;
+
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+    let audioPart: any = null;
+
+    if (audioBase64) {
+      const binaryBuffer = Buffer.from(audioBase64, 'base64');
+      if (binaryBuffer.length > 14 * 1024 * 1024) {
+        try {
+          const ext = cleanMime.includes('mp3') ? 'mp3' : cleanMime.includes('wav') ? 'wav' : 'webm';
+          tempFilePath = path.join(os.tmpdir(), `lecture_${Date.now()}.${ext}`);
+          fs.writeFileSync(tempFilePath, binaryBuffer);
+          const uploadedFile = await ai.files.upload({
+            file: tempFilePath,
+            config: {
+              mimeType: cleanMime,
+            },
+          });
+          audioPart = {
+            fileData: {
+              fileUri: uploadedFile.uri,
+              mimeType: uploadedFile.mimeType || cleanMime,
+            },
+          };
+        } catch (fileUploadErr) {
+          console.warn('Gemini File API upload fallback to capped inlineData:', fileUploadErr);
+          const cappedBase64 = binaryBuffer.subarray(0, 14 * 1024 * 1024).toString('base64');
+          audioPart = {
+            inlineData: {
+              mimeType: cleanMime,
+              data: cappedBase64,
+            },
+          };
+        }
+      } else {
+        audioPart = {
+          inlineData: {
+            mimeType: cleanMime,
+            data: audioBase64,
+          },
+        };
+      }
+    }
 
     const candidateModels = [
       'gemini-3.5-transcribe',
@@ -137,6 +324,10 @@ app.post('/api/transcribe', async (req, res) => {
     let responseText = '';
     let lastError: any = null;
 
+    const parts: any[] = [];
+    if (audioPart) parts.push(audioPart);
+    parts.push({ text: prompt });
+
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({
@@ -144,17 +335,7 @@ app.post('/api/transcribe', async (req, res) => {
           contents: [
             {
               role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType || 'audio/webm',
-                    data: audioBase64,
-                  },
-                },
-                {
-                  text: prompt,
-                },
-              ],
+              parts,
             },
           ],
           config: {
@@ -178,9 +359,9 @@ app.post('/api/transcribe', async (req, res) => {
 
     try {
       const parsed = parseJsonWithLatexSafe(responseText);
-      return res.json(parsed);
+      return streamHelper.sendJson(parsed);
     } catch {
-      return res.json({
+      return streamHelper.sendJson({
         fullText: responseText,
         summaryMarkdown: `## Конспект лекции\n\n${responseText}`,
         segments: [{ startTime: 0, endTime: 10, speaker: 'Лектор', text: responseText }],
@@ -190,23 +371,32 @@ app.post('/api/transcribe', async (req, res) => {
     }
   } catch (error: any) {
     console.error('Transcription error:', error);
-    res.status(500).json({ error: error.message || 'Ошибка распознавания аудио' });
+    return streamHelper.sendJson({ error: error.message || 'Ошибка распознавания аудио' });
+  } finally {
+    streamHelper.stop();
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch {}
+    }
   }
 });
 
 // Intelligent document analysis & structuring endpoint for PDF / Markdown / Text imports
 app.post('/api/structure-document', async (req, res) => {
+  const { rawText, fileName, fileBase64, mimeType } = req.body;
+  if (!rawText && !fileBase64) {
+    return res.status(400).json({ error: 'Текст или содержимое документа не получены' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
+  }
+
+  const streamHelper = startKeepAliveJsonResponse(res);
+
   try {
-    const { rawText, fileName, fileBase64, mimeType } = req.body;
-    if (!rawText && !fileBase64) {
-      return res.status(400).json({ error: 'Текст или содержимое документа не получены' });
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
-    }
-
     const ai = createGeminiClient(apiKey);
     const cleanDefaultTitle = String(fileName || 'Лекция').replace(/\.[^/.]+$/, '').replace(/_/g, ' ');
 
@@ -311,8 +501,8 @@ app.post('/api/structure-document', async (req, res) => {
     };
 
     const candidateModels = [
-      'gemini-3.8-flash',
       'gemini-flash-latest',
+      'gemini-3.8-flash',
       'gemini-3.1-flash-lite',
     ];
 
@@ -336,7 +526,7 @@ app.post('/api/structure-document', async (req, res) => {
         }
       } catch (err: any) {
         lastError = err;
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 300));
       }
     }
 
@@ -346,9 +536,9 @@ app.post('/api/structure-document', async (req, res) => {
 
     try {
       const parsed = parseJsonWithLatexSafe(responseText);
-      return res.json(parsed);
+      return streamHelper.sendJson(parsed);
     } catch {
-      return res.json({
+      return streamHelper.sendJson({
         isAlreadyStructured: false,
         title: cleanDefaultTitle,
         subject: 'Учебная дисциплина',
@@ -361,45 +551,55 @@ app.post('/api/structure-document', async (req, res) => {
     }
   } catch (error: any) {
     console.error('Document structuring error:', error);
-    res.status(500).json({ error: error.message || 'Ошибка интеллектуальной обработки документа' });
+    return streamHelper.sendJson({ error: error.message || 'Ошибка интеллектуальной обработки документа' });
+  } finally {
+    streamHelper.stop();
   }
 });
 
-// Deeply expand an existing lecture summary into a comprehensive textbook-grade lecture note
+// Deeply expand or reconstruct an existing lecture summary into a comprehensive textbook-grade lecture note
 app.post('/api/expand-lecture', async (req, res) => {
-  try {
-    const { title, subject, summaryMarkdown, transcriptText } = req.body;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
-    }
+  const { title, subject, summaryMarkdown, transcriptText, aiContext } = req.body;
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY не настроен' });
+  }
 
+  const streamHelper = startKeepAliveJsonResponse(res);
+
+  try {
     const ai = createGeminiClient(apiKey);
 
+    const contextBlock = aiContext
+      ? `\nКонтекст, ключевые термины и план занятия от студента:\n${String(aiContext).slice(0, 10000)}\n`
+      : '';
+
     const prompt = `Ты — ведущий университетский профессор по дисциплине "${subject || 'Высшая школа'}".
-Перед тобой текущий конспект лекции на тему "${title || 'Лекция'}" и исходная стенограмма/текст.
-Студент просит сделать этот конспект НАМНОГО ПОДРОБНЕЕ, ГЛУБЖЕ и ПОЛНЕЕ.
+Тема лекции: "${title || 'Лекция'}".${contextBlock}
+Перед тобой текущий конспект лекции и исходная стенограмма/заметки.
+Студент просит сформировать или расширить этот конспект так, чтобы он стал МАКСИМАЛЬНО ПОДРОБНЫМ, ГЛУБОКИМ и ФУНДАМЕНТАЛЬНЫМ университетским конспектом.
 
 Задача:
-Напиши фундаментальный, максимально подробный, развернутый академический конспект этой лекции в формате Markdown (с формулами LaTeX $...$ и $$...$$).
-1. Сохрани все факты из текущего конспекта и исходного текста, но расширь каждый раздел в 3–4 раза:
-   - Добавь строгие академические определения каждого понятия.
-   - Подробно распиши физический, математический или теоретический смысл каждого утверждения.
-   - Пошагово распиши выводы формул и расшифруй каждую переменную.
-   - Добавь подробные практические примеры с пошаговым решением/разбором.
-   - В конце добавь раздел с развернутыми ответами на главные вопросы, которые задают по этой теме на коллоквиуме и экзамене.
-2. Не используй общие фразы — пиши содержательный, плотный учебный материал университетского уровня.
+Напиши фундаментальный, максимально подробный, развернутый академический конспект по теме лекции и предоставленному контексту/стенограмме в формате Markdown (с формулами LaTeX $...$ и $$...$$).
+1. Обязательно используй четкую структуру из 6 разделов:
+   ## 1. Введение и контекст темы
+   ## 2. Ключевые понятия и строгие определения
+   ## 3. Подробный теоретический разбор (по подразделам ###)
+   ## 4. Математический аппарат, формулы и выводы (в синтаксисе LaTeX $...$ и $$...$$ с расшифровкой всех переменных)
+   ## 5. Разобранные примеры и практическое применение
+   ## 6. Итоговые выводы и контрольные вопросы к экзамену (с развернутыми ответами)
+2. Если в текущем конспекте или стенограмме мало текста (например, произошел сбой записи, но указана тема и контекст), полностью раскрой всю тему "${title}" по предмету "${subject}" с опорой на переданный контекст, термины и тезисы студента!
 3. Верни ТОЛЬКО готовый расширенный текст конспекта в формате Markdown (без JSON-обертки).
 
 Текущий конспект:
-${String(summaryMarkdown || '').slice(0, 40000)}
+${String(summaryMarkdown || '').slice(0, 30000)}
 
 Исходный текст / стенограмма:
-${String(transcriptText || '').slice(0, 40000)}`;
+${String(transcriptText || '').slice(0, 30000)}`;
 
     const candidateModels = [
-      'gemini-3.8-flash',
       'gemini-flash-latest',
+      'gemini-3.8-flash',
       'gemini-3.1-flash-lite',
     ];
 
@@ -412,7 +612,7 @@ ${String(transcriptText || '').slice(0, 40000)}`;
           model: modelName,
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           config: {
-            maxOutputTokens: 16384,
+            maxOutputTokens: 12288,
           },
         });
         expandedMarkdown = (response.text || '').trim();
@@ -421,7 +621,7 @@ ${String(transcriptText || '').slice(0, 40000)}`;
         }
       } catch (err: any) {
         lastError = err;
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 300));
       }
     }
 
@@ -429,10 +629,12 @@ ${String(transcriptText || '').slice(0, 40000)}`;
       throw lastError;
     }
 
-    return res.json({ summaryMarkdown: expandedMarkdown });
+    return streamHelper.sendJson({ summaryMarkdown: repairLatexControlChars(expandedMarkdown) });
   } catch (error: any) {
     console.error('Expand lecture error:', error);
-    res.status(500).json({ error: error.message || 'Не удалось расширить конспект' });
+    return streamHelper.sendJson({ error: error.message || 'Не удалось расширить конспект' });
+  } finally {
+    streamHelper.stop();
   }
 });
 

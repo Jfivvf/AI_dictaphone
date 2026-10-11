@@ -32,6 +32,76 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
   });
 };
 
+async function transcribeWithChunkSupport(params: {
+  base64Audio: string;
+  mimeType: string;
+  title: string;
+  subject: string;
+  aiContext: string;
+  liveTranscript?: string;
+  onStatusUpdate?: (msg: string) => void;
+}): Promise<any> {
+  const { base64Audio, mimeType, title, subject, aiContext, liveTranscript, onStatusUpdate } = params;
+  const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB per chunk — safe for all reverse proxies (prevents HTTP 413)
+
+  if (base64Audio.length > CHUNK_SIZE) {
+    const uploadId = `up-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const totalChunks = Math.ceil(base64Audio.length / CHUNK_SIZE);
+
+    for (let i = 0; i < totalChunks; i++) {
+      onStatusUpdate?.(`Передача длинной аудиозаписи (${i + 1} из ${totalChunks})...`);
+      const chunkData = base64Audio.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+      const chunkResp = await fetch('/api/upload-audio-chunk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId, chunkIndex: i, chunkData }),
+      });
+      if (!chunkResp.ok) {
+        throw new Error(`Chunk upload failed with status ${chunkResp.status}`);
+      }
+    }
+
+    onStatusUpdate?.('Нейросетевое распознавание речи и создание подробного конспекта...');
+    const response = await fetch('/api/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uploadId,
+        mimeType,
+        title,
+        subject,
+        aiContext,
+        liveTranscript,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Transcribe status ${response.status}`);
+    }
+    const rawText = (await response.text()).trim();
+    return JSON.parse(rawText);
+  } else {
+    const response = await fetch('/api/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioBase64: base64Audio,
+        mimeType,
+        title,
+        subject,
+        aiContext,
+        liveTranscript,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Transcribe status ${response.status}`);
+    }
+    const rawText = (await response.text()).trim();
+    return JSON.parse(rawText);
+  }
+}
+
 export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   settings,
   onLectureCreated,
@@ -58,15 +128,18 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [lectureSubject, setLectureSubject] = useState('');
   const [lectureTitle, setLectureTitle] = useState('');
   const [lecturerName, setLecturerName] = useState('');
+  const [aiContext, setAiContext] = useState('');
 
   // Audio recording refs
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const timerIntervalRef = useRef<number | null>(null);
+  const segmentIntervalRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const segmentRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recognitionRef = useRef<any>(null);
 
@@ -74,6 +147,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   useEffect(() => {
     return () => {
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      if (segmentIntervalRef.current) clearInterval(segmentIntervalRef.current);
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(track => track.stop());
@@ -129,7 +203,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       source.connect(analyser);
       drawWaveform();
 
-      // 4. Real MediaRecorder to capture audio
+      // 4. Real MediaRecorder to capture audio (24 kbps voice profile so a 45-90 min lecture is only 8-16 MB)
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/webm')
@@ -138,14 +212,82 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         ? 'audio/mp4'
         : '';
 
-      const mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      const recorderOptions: MediaRecorderOptions = mimeType
+        ? { mimeType, audioBitsPerSecond: 24000 }
+        : { audioBitsPerSecond: 24000 };
+
+      const mediaRecorder = new MediaRecorder(stream, recorderOptions);
       mediaRecorderRef.current = mediaRecorder;
       mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
-      mediaRecorder.start(250);
+      mediaRecorder.start(1000);
+
+      // 4b. Rolling 90-second background AI segment transcriber for long (>1 hour) lectures
+      let segStartSec = 0;
+      const startRollingSegmentRecorder = () => {
+        if (!mediaStreamRef.current || !mediaStreamRef.current.active) return;
+        const segChunks: Blob[] = [];
+        const currentStart = segStartSec;
+        try {
+          const segRec = new MediaRecorder(mediaStreamRef.current, recorderOptions);
+          segmentRecorderRef.current = segRec;
+          segRec.ondataavailable = (ev) => {
+            if (ev.data && ev.data.size > 0) segChunks.push(ev.data);
+          };
+          segRec.onstop = async () => {
+            if (segChunks.length === 0) return;
+            const segBlob = new Blob(segChunks, { type: mimeType || 'audio/webm' });
+            if (segBlob.size < 2000) return;
+            try {
+              const segB64 = await blobToBase64(segBlob);
+              const resp = await fetch('/api/transcribe-segment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audioBase64: segB64,
+                  mimeType: segBlob.type || 'audio/webm',
+                  title: lectureTitle,
+                  subject: lectureSubject,
+                  aiContext,
+                }),
+              });
+              if (resp.ok) {
+                const data = await resp.json();
+                const cleanText = (data.text || '').trim();
+                if (cleanText) {
+                  setTranscriptSegments(prev => [
+                    ...prev,
+                    {
+                      id: `seg-ai-${Date.now()}`,
+                      startTime: currentStart,
+                      endTime: currentStart + 90,
+                      speaker: 'Лектор',
+                      text: cleanText,
+                      bookmarked: false,
+                    },
+                  ]);
+                  setLiveTranscript(prev => (prev ? `${prev} ${cleanText}` : cleanText));
+                }
+              }
+            } catch {}
+          };
+          segRec.start();
+        } catch {}
+      };
+
+      startRollingSegmentRecorder();
+      segmentIntervalRef.current = window.setInterval(() => {
+        segStartSec += 90;
+        if (segmentRecorderRef.current && segmentRecorderRef.current.state === 'recording') {
+          try {
+            segmentRecorderRef.current.stop();
+          } catch {}
+          startRollingSegmentRecorder();
+        }
+      }, 90000);
 
       // 5. Web Speech API (runs in background for live typing feedback if supported by browser)
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -305,11 +447,17 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   // Stop recording and perform REAL AI speech recognition
   const finishAndProcess = async () => {
     if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+    if (segmentIntervalRef.current) clearInterval(segmentIntervalRef.current);
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     
     // Stop recognition
     if (recognitionRef.current) {
       try { recognitionRef.current.stop(); } catch {}
+    }
+
+    // Stop rolling segment recorder
+    if (segmentRecorderRef.current && segmentRecorderRef.current.state !== 'inactive') {
+      try { segmentRecorderRef.current.stop(); } catch {}
     }
 
     // Stop MediaRecorder
@@ -346,28 +494,55 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
 
     let aiResult: any = null;
+    const combinedBrowserTranscript =
+      liveTranscript.trim() || transcriptSegments.map(s => s.text).join(' ').trim();
 
-    // Call backend /api/transcribe with the real audio
+    // Call backend /api/transcribe with chunked support (prevents 413 on 40-90 min recordings)
     if (base64Audio) {
       try {
-        const response = await fetch('/api/transcribe', {
+        aiResult = await transcribeWithChunkSupport({
+          base64Audio,
+          mimeType: audioBlob?.type || 'audio/webm',
+          title: lectureTitle.trim(),
+          subject: lectureSubject.trim(),
+          aiContext: aiContext.trim(),
+          liveTranscript: combinedBrowserTranscript,
+          onStatusUpdate: setProcessingStatus,
+        });
+      } catch (err) {
+        console.warn('Failed to contact transcription backend:', err);
+      }
+    }
+
+    // Fallback: if audio transcription failed or returned empty, generate full lecture notes from browser transcript + aiContext
+    if ((!aiResult || (!aiResult.summaryMarkdown && !aiResult.fullText)) && (combinedBrowserTranscript || aiContext.trim() || lectureTitle.trim())) {
+      try {
+        setProcessingStatus('Формирование развернутого конспекта по стенограмме и контексту...');
+        const expandResp = await fetch('/api/expand-lecture', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            audioBase64: base64Audio,
-            mimeType: audioBlob?.type || 'audio/webm',
-            title: lectureTitle.trim(),
-            subject: lectureSubject.trim(),
+            title: lectureTitle.trim() || 'Лекция',
+            subject: lectureSubject.trim() || 'Учебная дисциплина',
+            summaryMarkdown: '',
+            transcriptText: combinedBrowserTranscript,
+            aiContext: aiContext.trim(),
           }),
         });
-
-        if (response.ok) {
-          aiResult = await response.json();
-        } else {
-          console.warn('API transcribe status not ok:', response.status);
+        if (expandResp.ok) {
+          const expandData = await expandResp.json();
+          if (expandData.summaryMarkdown) {
+            aiResult = {
+              fullText: combinedBrowserTranscript || aiContext.trim(),
+              summaryMarkdown: expandData.summaryMarkdown,
+              segments: transcriptSegments.length > 0 ? transcriptSegments : undefined,
+              actionItems: [],
+              latexFormulas: [],
+            };
+          }
         }
-      } catch (err) {
-        console.warn('Failed to contact transcription backend:', err);
+      } catch (fallbackErr) {
+        console.warn('Fallback expand-lecture failed:', fallbackErr);
       }
     }
 
@@ -504,20 +679,14 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     let aiResult: any = null;
     if (base64Audio) {
       try {
-        const response = await fetch('/api/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            audioBase64: base64Audio,
-            mimeType: selectedFile.type || 'audio/mp3',
-            title,
-            subject,
-          }),
+        aiResult = await transcribeWithChunkSupport({
+          base64Audio,
+          mimeType: selectedFile.type || 'audio/mp3',
+          title,
+          subject,
+          aiContext: aiContext.trim(),
+          onStatusUpdate: setProcessingStatus,
         });
-
-        if (response.ok) {
-          aiResult = await response.json();
-        }
       } catch (err) {
         console.warn('Failed to transcribe file via API:', err);
       }
@@ -635,6 +804,59 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Lecture Details moved to the top */}
+        {recordingState !== 'processing' && (
+          <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+              Информация о занятии (необязательно)
+            </h3>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-neutral-400 mb-1">
+                  Предмет / Дисциплина
+                </label>
+                <input
+                  type="text"
+                  value={lectureSubject}
+                  maxLength={200}
+                  onChange={(e) => setLectureSubject(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  placeholder="Например: Высшая математика"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-neutral-400 mb-1">
+                  Тема занятия
+                </label>
+                <input
+                  type="text"
+                  value={lectureTitle}
+                  maxLength={300}
+                  onChange={(e) => setLectureTitle(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  placeholder="Тема лекции"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-neutral-400 mb-1">
+                  Преподаватель
+                </label>
+                <input
+                  type="text"
+                  value={lecturerName}
+                  maxLength={200}
+                  onChange={(e) => setLecturerName(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+                  placeholder="ФИО лектора"
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Processing State with Live Spinner */}
         {recordingState === 'processing' ? (
@@ -803,55 +1025,26 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               )}
             </div>
 
-            {/* Lecture Details (Optional) */}
-            <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
-                Информация о занятии (необязательно)
-              </h3>
-              
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-neutral-400 mb-1">
-                    Предмет / Дисциплина
-                  </label>
-                  <input
-                    type="text"
-                    value={lectureSubject}
-                    maxLength={200}
-                    onChange={(e) => setLectureSubject(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-                    placeholder="Например: Высшая математика"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-neutral-400 mb-1">
-                    Тема занятия
-                  </label>
-                  <input
-                    type="text"
-                    value={lectureTitle}
-                    maxLength={300}
-                    onChange={(e) => setLectureTitle(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-                    placeholder="Тема лекции"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-neutral-400 mb-1">
-                    Преподаватель
-                  </label>
-                  <input
-                    type="text"
-                    value={lecturerName}
-                    maxLength={200}
-                    onChange={(e) => setLecturerName(e.target.value)}
-                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-                    placeholder="ФИО лектора"
-                  />
-                </div>
+            {/* AI Context & Terminology Hint (in place of old Lecture Details) */}
+            <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                  Контекст и термины для нейросети (необязательно)
+                </h3>
+                <span className="text-[11px] text-neutral-500">
+                  Повышает точность распознавания терминов и формул
+                </span>
               </div>
+
+              <textarea
+                value={aiContext}
+                onChange={(e) => setAiContext(e.target.value)}
+                rows={3}
+                maxLength={2000}
+                placeholder="Укажите сложные термины, фамилии ученых, обозначения или краткий план лекции (например: Уравнения Коши–Римана, контурный интеграл, теорема вычетов, аналитическая функция f(z))..."
+                className="w-full px-3 py-2.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 leading-relaxed resize-none"
+              />
             </div>
 
           </div>
@@ -914,6 +1107,28 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 <audio controls src={fileAudioUrl} className="w-full h-8" />
               </div>
             )}
+
+            {/* AI Context in File Mode as well */}
+            <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                  Контекст и термины для нейросети (необязательно)
+                </h3>
+                <span className="text-[11px] text-neutral-500">
+                  Повышает точность распознавания терминов и формул
+                </span>
+              </div>
+
+              <textarea
+                value={aiContext}
+                onChange={(e) => setAiContext(e.target.value)}
+                rows={3}
+                maxLength={2000}
+                placeholder="Укажите сложные термины, фамилии ученых, обозначения или краткий план лекции..."
+                className="w-full px-3 py-2.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 leading-relaxed resize-none"
+              />
+            </div>
           </div>
         )}
 

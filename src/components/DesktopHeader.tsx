@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  FileCode,
   LogOut,
   LogIn
 } from 'lucide-react';
@@ -9,7 +8,6 @@ import { AxolotlLogo } from './AxolotlLogo';
 
 interface DesktopHeaderProps {
   settings: AppSettings;
-  onOpenPySideCode: () => void;
   onNavigateToAccount: () => void;
   activeTab: string;
   userEmail?: string | null;
@@ -21,7 +19,6 @@ interface DesktopHeaderProps {
 
 export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
   settings,
-  onOpenPySideCode,
   onNavigateToAccount,
   isAuthenticated,
   onSignOut,
@@ -29,7 +26,7 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
 }) => {
   return (
     <header className="h-14 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between px-4 select-none shrink-0">
-      {/* Brand Logo + AxAI Name (click logo to upload exact custom image file) */}
+      {/* Brand Logo + AxAI Name */}
       <div className="flex items-center gap-2.5">
         <AxolotlLogo className="w-8 h-8 rounded-lg shadow-sm" allowUploadOnClick={true} />
         <span className="font-bold text-white text-base tracking-tight whitespace-nowrap">
@@ -39,14 +36,6 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
 
       {/* Primary Actions & Auth Controls */}
       <div className="flex items-center gap-2">
-        <button
-          onClick={onOpenPySideCode}
-          className="p-2 rounded-lg bg-neutral-800/80 hover:bg-neutral-700 text-neutral-400 hover:text-neutral-200 transition-colors"
-          title="Исходный код приложения"
-        >
-          <FileCode className="w-4 h-4" />
-        </button>
-
         <button
           onClick={onNavigateToAccount}
           className="flex items-center gap-2 pl-2 pr-3 py-1 rounded-lg bg-neutral-800/60 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 text-xs transition-colors"

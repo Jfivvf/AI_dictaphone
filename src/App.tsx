@@ -40,7 +40,6 @@ import { DeadlinesTab } from './components/DeadlinesTab';
 import { StorageTab } from './components/StorageTab';
 import { SettingsTab } from './components/SettingsTab';
 import { StudentProfileTab } from './components/StudentProfileTab';
-import { PySide6CodeExportModal } from './components/PySide6CodeExportModal';
 import { AuthScreen } from './components/AuthScreen';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -116,9 +115,6 @@ export default function App() {
     }
     return DEFAULT_SETTINGS;
   });
-
-  // PySide6 code export modal state
-  const [isPySideModalOpen, setIsPySideModalOpen] = useState(false);
 
   // Logout confirmation modal state
   const [isLogoutModalOpen, setIsLogoutModalOpen] = useState(false);
@@ -426,7 +422,6 @@ export default function App() {
       {/* Desktop App Window Titlebar */}
       <DesktopHeader
         settings={settings}
-        onOpenPySideCode={() => setIsPySideModalOpen(true)}
         onNavigateToAccount={() => setActiveTab('profile')}
         activeTab={activeTab}
         userEmail={currentUser?.email}
@@ -721,12 +716,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* PySide6 Code Modal */}
-      <PySide6CodeExportModal
-        isOpen={isPySideModalOpen}
-        onClose={() => setIsPySideModalOpen(false)}
-      />
 
     </div>
   );

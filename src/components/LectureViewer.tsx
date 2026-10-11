@@ -53,6 +53,8 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [isExpandingNote, setIsExpandingNote] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [showContextPrompt, setShowContextPrompt] = useState(false);
+  const [customContextInput, setCustomContextInput] = useState('');
 
   if (!lecture) {
     return (
@@ -96,33 +98,53 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
     setIsEditingMarkdown(false);
   };
 
-  // Expand lecture notes deeply with AI
-  const handleExpandLecture = async () => {
+  // Expand lecture notes deeply with AI (optionally using custom context/topic)
+  const handleExpandLecture = async (extraContext?: string) => {
     if (isExpandingNote) return;
     setIsExpandingNote(true);
     try {
       const transcriptText = lecture.transcript.map(s => s.text).join('\n');
-      const response = await fetch('/api/expand-lecture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: lecture.title,
-          subject: lecture.subject,
-          summaryMarkdown: lecture.summaryMarkdown,
-          transcriptText
-        })
+      const payload = JSON.stringify({
+        title: lecture.title,
+        subject: lecture.subject,
+        summaryMarkdown: lecture.summaryMarkdown,
+        transcriptText,
+        aiContext: (extraContext ?? customContextInput).trim()
       });
-      if (response.ok) {
-        const data = await response.json();
-        if (data.summaryMarkdown) {
-          onUpdateLecture({
-            ...lecture,
-            summaryMarkdown: String(data.summaryMarkdown).slice(0, 100000)
+
+      let data: any = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await fetch('/api/expand-lecture', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload
           });
+          if (response.ok) {
+            const rawText = (await response.text()).trim();
+            if (rawText) {
+              data = JSON.parse(rawText);
+              break;
+            }
+          }
+        } catch (fetchErr) {
+          if (attempt === 0) {
+            await new Promise(r => setTimeout(r, 1000));
+          } else {
+            console.warn('Expand lecture network retry exhausted:', fetchErr);
+          }
         }
       }
+
+      if (data && data.summaryMarkdown) {
+        onUpdateLecture({
+          ...lecture,
+          summaryMarkdown: String(data.summaryMarkdown).slice(0, 100000)
+        });
+        setShowContextPrompt(false);
+      }
     } catch (err) {
-      console.error('Failed to expand lecture:', err);
+      console.warn('Expand lecture error:', err);
     } finally {
       setIsExpandingNote(false);
     }
@@ -302,7 +324,17 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handleExpandLecture}
+                    onClick={() => setShowContextPrompt(prev => !prev)}
+                    disabled={isExpandingNote || isEditingMarkdown}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-xs text-neutral-200 font-medium transition-colors disabled:opacity-50"
+                    title="Ввести контекст/тему лекции и сгенерировать полный конспект"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Контекст для ИИ</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleExpandLecture()}
                     disabled={isExpandingNote || isEditingMarkdown}
                     className="flex items-center gap-1.5 px-3 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-xs text-indigo-300 font-medium transition-colors disabled:opacity-50"
                     title="Развернуть конспект в 3–4 раза подробнее с выводом формул, примерами и вопросами к экзамену"
@@ -336,6 +368,48 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Context-driven regeneration box */}
+              {(showContextPrompt || lecture.summaryMarkdown.includes('Аудиозапись сохранена')) && (
+                <div className="p-4 rounded-xl bg-indigo-950/30 border border-indigo-800/60 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold text-indigo-200 flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4 text-indigo-400" />
+                      Восстановление / Генерация полного конспекта по теме и контексту
+                    </h4>
+                  </div>
+                  <p className="text-xs text-neutral-300 leading-relaxed">
+                    Вставьте сюда ваш контекст, план или ключевые термины занятия — нейросеть сразу сформирует полный 6-раздельный университетский конспект с формулами LaTeX для этой лекции:
+                  </p>
+                  <textarea
+                    value={customContextInput}
+                    onChange={(e) => setCustomContextInput(e.target.value)}
+                    rows={3}
+                    placeholder="Введите тему, термины, теоремы или план, которые вы писали в поле контекста..."
+                    className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 resize-none"
+                  />
+                  <div className="flex justify-end gap-2">
+                    {showContextPrompt && (
+                      <button
+                        type="button"
+                        onClick={() => setShowContextPrompt(false)}
+                        className="px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs text-neutral-300"
+                      >
+                        Скрыть
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleExpandLecture(customContextInput)}
+                      disabled={isExpandingNote}
+                      className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors disabled:opacity-50"
+                    >
+                      <Sparkles className={`w-3.5 h-3.5 ${isExpandingNote ? 'animate-spin' : ''}`} />
+                      <span>{isExpandingNote ? 'Формирование конспекта...' : 'Сформировать полный конспект'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Rendered Container */}
               <div className="p-6 rounded-xl bg-neutral-900 border border-neutral-800 shadow-sm print:border-none print:bg-transparent">
