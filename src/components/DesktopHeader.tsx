@@ -4,7 +4,7 @@ import {
   LogIn
 } from 'lucide-react';
 import { AppSettings } from '../types';
-import { AxolotlLogo } from './AxolotlLogo';
+import { AxolotlLogo, UserAvatar } from './AxolotlLogo';
 
 interface DesktopHeaderProps {
   settings: AppSettings;
@@ -26,22 +26,26 @@ export const DesktopHeader: React.FC<DesktopHeaderProps> = ({
 }) => {
   return (
     <header className="h-14 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between px-4 select-none shrink-0">
-      {/* Brand Logo + AxAI Name */}
+      {/* Brand Logo + AxAI Name (Fixed App Icon) */}
       <div className="flex items-center gap-2.5">
-        <AxolotlLogo className="w-8 h-8 rounded-lg shadow-sm" allowUploadOnClick={true} />
+        <AxolotlLogo className="w-8 h-8 rounded-lg shadow-sm" />
         <span className="font-bold text-white text-base tracking-tight whitespace-nowrap">
           AxAI
         </span>
       </div>
 
-      {/* Primary Actions & Auth Controls */}
+      {/* Primary Actions & Auth Controls (Separate User Avatar) */}
       <div className="flex items-center gap-2">
         <button
           onClick={onNavigateToAccount}
           className="flex items-center gap-2 pl-2 pr-3 py-1 rounded-lg bg-neutral-800/60 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 text-xs transition-colors"
           title="Открыть профиль студента"
         >
-          <AxolotlLogo className="w-6 h-6 rounded-full" allowUploadOnClick={false} />
+          <UserAvatar
+            avatarUrl={settings.student.avatarUrl}
+            className="w-6 h-6 rounded-full"
+            allowUploadOnClick={false}
+          />
           <span className="font-medium max-w-[130px] truncate hidden sm:inline">
             {settings.student.name.split(' ')[0]} ({settings.student.group})
           </span>

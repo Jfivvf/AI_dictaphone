@@ -1,26 +1,64 @@
 import React, { useState, useEffect, useRef } from 'react';
 import defaultAxolotlImg from '../assets/images/axai_logo_1791229912418.jpg';
 
-const CUSTOM_LOGO_STORAGE_KEY = 'axai_custom_logo_data_url';
-const LOGO_UPDATED_EVENT = 'axai-logo-updated';
+const USER_AVATAR_STORAGE_KEY = 'axai_user_avatar_256_data_url';
+const AVATAR_UPDATED_EVENT = 'axai-user-avatar-updated';
+
+/**
+ * Обрезает загруженную картинку до квадрата 1:1 по центру и сжимает до 256×256 WebP/JPEG
+ * для компактного хранения в профиле пользователя (SQLite / Firestore < 1 МБ).
+ */
+export function cropAndCompressAvatarSquare256(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Не удалось прочитать файл изображения'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Некорректный формат изображения'));
+      img.onload = () => {
+        const size = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(reader.result));
+          return;
+        }
+        const side = Math.min(img.width, img.height);
+        const sx = Math.floor((img.width - side) / 2);
+        const sy = Math.floor((img.height - side) / 2);
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+
+        // Пробуем WebP (компактнее), иначе JPEG
+        let compressed = canvas.toDataURL('image/webp', 0.85);
+        if (!compressed.startsWith('data:image/webp')) {
+          compressed = canvas.toDataURL('image/jpeg', 0.85);
+        }
+        resolve(compressed);
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export function setCustomAxaiLogo(dataUrl: string) {
   try {
-    localStorage.setItem(CUSTOM_LOGO_STORAGE_KEY, dataUrl);
-    window.dispatchEvent(new CustomEvent(LOGO_UPDATED_EVENT, { detail: dataUrl }));
-    const link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
-    if (link) {
-      link.type = 'image/jpeg';
-      link.href = dataUrl;
+    if (dataUrl) {
+      localStorage.setItem(USER_AVATAR_STORAGE_KEY, dataUrl);
+    } else {
+      localStorage.removeItem(USER_AVATAR_STORAGE_KEY);
     }
+    window.dispatchEvent(new CustomEvent(AVATAR_UPDATED_EVENT, { detail: dataUrl }));
   } catch (err) {
-    console.warn('Could not save custom logo to localStorage:', err);
+    console.warn('Could not save user avatar to localStorage:', err);
   }
 }
 
 export function getCustomAxaiLogo(): string | null {
   try {
-    return localStorage.getItem(CUSTOM_LOGO_STORAGE_KEY);
+    return localStorage.getItem(USER_AVATAR_STORAGE_KEY);
   } catch {
     return null;
   }
@@ -31,45 +69,77 @@ interface AxolotlLogoProps {
   allowUploadOnClick?: boolean;
 }
 
+/**
+ * Фиксированная системная иконка приложения AxAI (розовый аксолотль в очках с ручкой).
+ * Отвечает ТОЛЬКО за логотип бренда в шапке и на экране входа и НЕ меняется при смене аватарки пользователя.
+ */
 export const AxolotlLogo: React.FC<AxolotlLogoProps> = ({
   className = 'w-8 h-8',
-  allowUploadOnClick = true,
 }) => {
-  const [logoSrc, setLogoSrc] = useState<string>(() => getCustomAxaiLogo() || defaultAxolotlImg);
+  return (
+    <img
+      src={defaultAxolotlImg}
+      alt="AxAI"
+      referrerPolicy="no-referrer"
+      title="AxAI — Фирменная иконка приложения"
+      className={`shrink-0 select-none object-cover ${className}`}
+    />
+  );
+};
+
+interface UserAvatarProps {
+  className?: string;
+  avatarUrl?: string | null;
+  allowUploadOnClick?: boolean;
+  onAvatarChange?: (compressedDataUrl: string) => void;
+}
+
+/**
+ * Отдельный компонент аватарки пользователя.
+ * По умолчанию показывает аксолотля, если своей картинки в профиле нет.
+ */
+export const UserAvatar: React.FC<UserAvatarProps> = ({
+  className = 'w-8 h-8 rounded-full',
+  avatarUrl,
+  allowUploadOnClick = false,
+  onAvatarChange,
+}) => {
+  const [avatarSrc, setAvatarSrc] = useState<string>(
+    () => avatarUrl || getCustomAxaiLogo() || defaultAxolotlImg
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const stored = getCustomAxaiLogo();
-    if (stored) {
-      setLogoSrc(stored);
-      const link = document.querySelector("link[rel*='icon']") as HTMLLinkElement | null;
-      if (link) {
-        link.href = stored;
-      }
+    if (avatarUrl) {
+      setAvatarSrc(avatarUrl);
+    } else {
+      setAvatarSrc(getCustomAxaiLogo() || defaultAxolotlImg);
     }
+  }, [avatarUrl]);
 
-    const handleLogoUpdate = (e: Event) => {
+  useEffect(() => {
+    const handleAvatarUpdate = (e: Event) => {
       const customEvent = e as CustomEvent<string>;
-      if (customEvent.detail) {
-        setLogoSrc(customEvent.detail);
-      }
+      setAvatarSrc(customEvent.detail || defaultAxolotlImg);
     };
 
-    window.addEventListener(LOGO_UPDATED_EVENT, handleLogoUpdate);
-    return () => window.removeEventListener(LOGO_UPDATED_EVENT, handleLogoUpdate);
+    window.addEventListener(AVATAR_UPDATED_EVENT, handleAvatarUpdate);
+    return () => window.removeEventListener(AVATAR_UPDATED_EVENT, handleAvatarUpdate);
   }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setLogoSrc(reader.result);
-        setCustomAxaiLogo(reader.result);
+    try {
+      const square256 = await cropAndCompressAvatarSquare256(file);
+      setAvatarSrc(square256);
+      setCustomAxaiLogo(square256);
+      if (onAvatarChange) {
+        onAvatarChange(square256);
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err) {
+      console.warn('Avatar compression error:', err);
+    }
     e.target.value = '';
   };
 
@@ -85,12 +155,14 @@ export const AxolotlLogo: React.FC<AxolotlLogoProps> = ({
         />
       )}
       <img
-        src={logoSrc}
-        alt="AxAI"
+        src={avatarSrc}
+        alt="Аватар профиля"
         referrerPolicy="no-referrer"
         onClick={allowUploadOnClick ? () => fileInputRef.current?.click() : undefined}
-        title={allowUploadOnClick ? 'Нажмите, чтобы выбрать свой оригинал картинки с компьютера' : 'AxAI'}
-        className={`shrink-0 select-none object-cover ${allowUploadOnClick ? 'cursor-pointer hover:opacity-90 transition-opacity' : ''} ${className}`}
+        title={allowUploadOnClick ? 'Нажмите, чтобы сменить аватарку профиля (256×256)' : 'Аватар студента'}
+        className={`shrink-0 select-none object-cover ${
+          allowUploadOnClick ? 'cursor-pointer hover:opacity-90 transition-opacity' : ''
+        } ${className}`}
       />
     </>
   );

@@ -24,6 +24,14 @@ export interface LatexFormula {
   context: string;
 }
 
+export interface SummaryRevision {
+  id: string;
+  timestamp: string;
+  label: string;
+  summaryMarkdown: string;
+  wordCount: number;
+}
+
 export interface Lecture {
   id: string;
   title: string;
@@ -38,6 +46,7 @@ export interface Lecture {
   quantization: string;
   transcript: TranscriptSegment[];
   summaryMarkdown: string;
+  summaryHistory?: SummaryRevision[];
   actionItems: ActionItem[];
   latexFormulas: LatexFormula[];
   keyDefinitions: { term: string; definition: string }[];
@@ -89,6 +98,7 @@ export interface StudentProfile {
   semester: number;
   degree: 'Bachelor' | 'Master' | 'Specialist';
   theme: 'dark' | 'light';
+  avatarUrl?: string;
 }
 
 export interface AppSettings {

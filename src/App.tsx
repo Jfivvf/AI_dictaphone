@@ -452,10 +452,10 @@ export default function App() {
               }`}
             >
               <Mic className="w-4 h-4 shrink-0 text-rose-400" />
-              <span>Запись лекции</span>
+              <span>Запись</span>
             </button>
 
-            {/* 2. My Lectures / History */}
+            {/* 2. My Projects / History */}
             <button
               onClick={() => setActiveTab('history')}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-colors text-left ${
@@ -466,7 +466,7 @@ export default function App() {
             >
               <div className="flex items-center gap-3">
                 <BookOpen className="w-4 h-4 shrink-0" />
-                <span>Мои лекции</span>
+                <span>Мои проекты</span>
               </div>
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeTab === 'history' || activeTab === 'viewer' ? 'bg-indigo-700 text-white' : 'bg-neutral-800 text-neutral-400'

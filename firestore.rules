@@ -55,8 +55,9 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'uid', 'name', 'university', 'faculty', 'group',
-          'semester', 'degree', 'theme', 'createdAt', 'updatedAt'
+          'semester', 'degree', 'theme', 'avatarUrl', 'createdAt', 'updatedAt'
         ]) &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 150000)) &&
         data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
         data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.uid == request.auth.uid &&

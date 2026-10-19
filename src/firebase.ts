@@ -243,6 +243,7 @@ export async function ensureUserProfileInFirestore(
             ? data.degree
             : 'Bachelor',
         theme: data.theme === 'light' ? 'light' : 'dark',
+        avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : defaultStudent.avatarUrl,
       };
     }
 
@@ -261,6 +262,7 @@ export async function ensureUserProfileInFirestore(
           ? defaultStudent.degree
           : 'Bachelor',
       theme: defaultStudent.theme === 'light' ? 'light' : 'dark',
+      avatarUrl: defaultStudent.avatarUrl || '',
     };
 
     const batch = writeBatch(db);
@@ -273,6 +275,7 @@ export async function ensureUserProfileInFirestore(
       semester: newProfile.semester,
       degree: newProfile.degree,
       theme: newProfile.theme,
+      avatarUrl: (newProfile.avatarUrl || '').slice(0, 140000),
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -319,6 +322,7 @@ export async function updateUserProfileInFirestore(
           ? profile.degree
           : 'Bachelor',
       theme: profile.theme === 'light' ? 'light' : 'dark',
+      avatarUrl: typeof profile.avatarUrl === 'string' ? profile.avatarUrl.slice(0, 140000) : '',
       updatedAt: serverTimestamp(),
     });
 

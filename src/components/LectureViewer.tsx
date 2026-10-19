@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   FileText, 
   CheckSquare, 
@@ -18,9 +18,11 @@ import {
   ArrowLeft,
   Share2,
   Trash2,
-  Sparkles
+  Sparkles,
+  History,
+  RotateCcw
 } from 'lucide-react';
-import { Lecture, ActionItem } from '../types';
+import { Lecture, ActionItem, SummaryRevision } from '../types';
 import { LatexRenderer, SingleFormula } from './LatexRenderer';
 import {
   exportLectureToMarkdown,
@@ -28,6 +30,38 @@ import {
   exportLectureToPdf,
   repairCorruptedLatex,
 } from '../utils/exportHelpers';
+
+const SUMMARY_HISTORY_STORAGE_KEY = 'lectura_ai_summary_history_v1';
+
+function countWords(text: string): number {
+  const cleaned = String(text || '')
+    .replace(/[#*`~>\-_]/g, ' ')
+    .trim();
+  if (!cleaned) return 0;
+  return cleaned.split(/\s+/).filter(Boolean).length;
+}
+
+function loadStoredRevisions(lectureId: string): SummaryRevision[] {
+  try {
+    const raw = localStorage.getItem(SUMMARY_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const map = JSON.parse(raw);
+    return Array.isArray(map?.[lectureId]) ? map[lectureId] : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredRevisions(lectureId: string, revisions: SummaryRevision[]) {
+  try {
+    const raw = localStorage.getItem(SUMMARY_HISTORY_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    map[lectureId] = revisions.slice(0, 15);
+    localStorage.setItem(SUMMARY_HISTORY_STORAGE_KEY, JSON.stringify(map));
+  } catch (err) {
+    console.warn('Could not persist summary history to localStorage:', err);
+  }
+}
 
 interface LectureViewerProps {
   lecture: Lecture | null;
@@ -52,9 +86,174 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
   const [editedMarkdown, setEditedMarkdown] = useState(lecture?.summaryMarkdown || '');
   const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
   const [isExpandingNote, setIsExpandingNote] = useState(false);
+  const [expandProgress, setExpandProgress] = useState(0);
+  const [expandElapsedSeconds, setExpandElapsedSeconds] = useState(0);
+  const [expandStageText, setExpandStageText] = useState('Подготовка контекста и стенограммы...');
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [showContextPrompt, setShowContextPrompt] = useState(false);
   const [customContextInput, setCustomContextInput] = useState('');
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [revisions, setRevisions] = useState<SummaryRevision[]>([]);
+
+  // Load version history for the active lecture
+  useEffect(() => {
+    if (!lecture) {
+      setRevisions([]);
+      return;
+    }
+    const stored = loadStoredRevisions(lecture.id);
+    if (stored.length > 0) {
+      setRevisions(stored);
+    } else if (Array.isArray(lecture.summaryHistory) && lecture.summaryHistory.length > 0) {
+      setRevisions(lecture.summaryHistory);
+      saveStoredRevisions(lecture.id, lecture.summaryHistory);
+    } else {
+      setRevisions([]);
+    }
+  }, [lecture?.id]);
+
+  // Smooth progress bar timer while AI is generating the detailed summary
+  useEffect(() => {
+    if (!isExpandingNote) return;
+
+    const startTime = Date.now();
+    setExpandElapsedSeconds(0);
+    setExpandProgress(6);
+    setExpandStageText('Анализ исходного конспекта, стенограммы и контекста лекции...');
+
+    const interval = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      setExpandElapsedSeconds(elapsed);
+
+      // Smooth asymptotic curve reaching ~95% around 30-35 seconds
+      const nextProgress = Math.min(95, Math.max(8, Math.round(96 * (1 - Math.exp(-elapsed / 13)))));
+      setExpandProgress(nextProgress);
+
+      if (nextProgress < 28) {
+        setExpandStageText('Анализ исходного конспекта, стенограммы и контекста лекции...');
+      } else if (nextProgress < 56) {
+        setExpandStageText('Формирование теоретического разбора, теорем и строгих определений...');
+      } else if (nextProgress < 82) {
+        setExpandStageText('Вывод математических формул LaTeX и разбор практических примеров...');
+      } else {
+        setExpandStageText('Составление итоговых выводов и экзаменационных вопросов с ответами...');
+      }
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [isExpandingNote]);
+
+  // Auto-repair lectures where a raw JSON payload ({ "summaryMarkdown": ..., "segments": ... }) was saved as text
+  React.useEffect(() => {
+    if (!lecture) return;
+
+    const rawCandidate =
+      (lecture.summaryMarkdown && lecture.summaryMarkdown.includes('"summaryMarkdown"') && lecture.summaryMarkdown.includes('"segments"'))
+        ? lecture.summaryMarkdown
+        : (lecture.transcript?.length === 1 && lecture.transcript[0].text.includes('"summaryMarkdown"'))
+          ? lecture.transcript[0].text
+          : null;
+
+    if (!rawCandidate) return;
+
+    try {
+      const firstBrace = rawCandidate.indexOf('{');
+      const lastBrace = rawCandidate.lastIndexOf('}');
+      if (firstBrace === -1 || lastBrace <= firstBrace) return;
+
+      const jsonSlice = rawCandidate
+        .slice(firstBrace, lastBrace + 1)
+        .replace(/(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
+
+      const parsed = JSON.parse(jsonSlice);
+      if (!parsed || typeof parsed !== 'object') return;
+
+      const conciseFromRaw =
+        typeof parsed.summaryMarkdown === 'string' && parsed.summaryMarkdown.trim()
+          ? parsed.summaryMarkdown.trim()
+          : '';
+
+      const unpackedSummary =
+        lecture.summaryMarkdown && !lecture.summaryMarkdown.includes('"summaryMarkdown"')
+          ? lecture.summaryMarkdown
+          : (conciseFromRaw || lecture.summaryMarkdown);
+
+      // If the user already expanded the lecture, preserve the original concise summary from raw JSON in version history!
+      if (
+        conciseFromRaw &&
+        unpackedSummary !== conciseFromRaw &&
+        loadStoredRevisions(lecture.id).length === 0
+      ) {
+        const seededRevisions: SummaryRevision[] = [
+          {
+            id: `rev-initial-${Date.now() - 60000}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+            label: 'Исходная (лаконичная) версия',
+            summaryMarkdown: conciseFromRaw,
+            wordCount: countWords(conciseFromRaw),
+          },
+          {
+            id: `rev-expanded-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+            label: 'Подробная версия (ИИ)',
+            summaryMarkdown: unpackedSummary,
+            wordCount: countWords(unpackedSummary),
+          },
+        ];
+        setRevisions(seededRevisions);
+        saveStoredRevisions(lecture.id, seededRevisions);
+      }
+
+      const unpackedSegments =
+        Array.isArray(parsed.segments) && parsed.segments.length > 0
+          ? parsed.segments.map((s: any, idx: number) => ({
+              id: `seg-repaired-${idx}`,
+              startTime: Number(s.startTime) || 0,
+              endTime: Number(s.endTime) || 60,
+              speaker: s.speaker || 'Лектор',
+              text: s.text || '',
+              bookmarked: false,
+            }))
+          : lecture.transcript;
+
+      const unpackedTasks: ActionItem[] =
+        lecture.actionItems.length > 0
+          ? lecture.actionItems
+          : Array.isArray(parsed.actionItems)
+            ? parsed.actionItems.map((item: any, idx: number) => ({
+                id: `task-repaired-${idx}`,
+                task: item.task || 'Задание',
+                deadline: item.deadline || 'К следующему занятию',
+                dateISO: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().split('T')[0],
+                type: 'homework',
+                completed: false,
+                priority: item.priority === 'high' ? 'high' : 'medium',
+              }))
+            : [];
+
+      const unpackedFormulas =
+        lecture.latexFormulas.length > 0
+          ? lecture.latexFormulas
+          : Array.isArray(parsed.latexFormulas)
+            ? parsed.latexFormulas.map((f: any, idx: number) => ({
+                id: `formula-repaired-${idx}`,
+                title: f.title || 'Формула из лекции',
+                latex: f.latex || '',
+                context: f.context || '',
+              }))
+            : [];
+
+      onUpdateLecture({
+        ...lecture,
+        summaryMarkdown: unpackedSummary,
+        transcript: unpackedSegments,
+        actionItems: unpackedTasks,
+        latexFormulas: unpackedFormulas,
+      });
+    } catch (e) {
+      console.warn('Could not auto-unpack raw JSON lecture:', e);
+    }
+  }, [lecture?.id]);
 
   if (!lecture) {
     return (
@@ -89,11 +288,78 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
     });
   };
 
-  // Save edited markdown
-  const handleSaveMarkdown = () => {
+  // Helper to record a summary version snapshot if not already stored
+  const pushSummaryRevision = (
+    currentRevs: SummaryRevision[],
+    markdownText: string,
+    label: string
+  ): SummaryRevision[] => {
+    const trimmed = String(markdownText || '').trim();
+    if (!trimmed) return currentRevs;
+    if (currentRevs.some((r) => r.summaryMarkdown.trim() === trimmed)) {
+      return currentRevs;
+    }
+    const newRev: SummaryRevision = {
+      id: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      label,
+      summaryMarkdown: trimmed,
+      wordCount: countWords(trimmed),
+    };
+    return [...currentRevs, newRev];
+  };
+
+  // Restore a specific version from history
+  const handleRestoreRevision = (targetRev: SummaryRevision) => {
+    let nextRevs = [...revisions];
+    if (lecture.summaryMarkdown.trim() !== targetRev.summaryMarkdown.trim()) {
+      nextRevs = pushSummaryRevision(
+        nextRevs,
+        lecture.summaryMarkdown,
+        nextRevs.length === 0 ? 'Исходная (лаконичная) версия' : `Сохраненная версия #${nextRevs.length + 1}`
+      );
+    }
+    setRevisions(nextRevs);
+    saveStoredRevisions(lecture.id, nextRevs);
     onUpdateLecture({
       ...lecture,
-      summaryMarkdown: editedMarkdown
+      summaryMarkdown: targetRev.summaryMarkdown,
+      summaryHistory: nextRevs,
+    });
+    setEditedMarkdown(targetRev.summaryMarkdown);
+  };
+
+  // Quick 1-click revert to the previous (more concise) version
+  const previousRevision = [...revisions]
+    .reverse()
+    .find((r) => r.summaryMarkdown.trim() !== lecture.summaryMarkdown.trim());
+
+  const handleRevertToPrevious = () => {
+    if (!previousRevision) return;
+    handleRestoreRevision(previousRevision);
+  };
+
+  // Save edited markdown
+  const handleSaveMarkdown = () => {
+    let nextRevs = [...revisions];
+    if (editedMarkdown.trim() && editedMarkdown.trim() !== lecture.summaryMarkdown.trim()) {
+      nextRevs = pushSummaryRevision(
+        nextRevs,
+        lecture.summaryMarkdown,
+        nextRevs.length === 0 ? 'Исходная (лаконичная) версия' : `Версия до правки #${nextRevs.length + 1}`
+      );
+      nextRevs = pushSummaryRevision(
+        nextRevs,
+        editedMarkdown,
+        `Ручное редактирование #${nextRevs.length + 1}`
+      );
+      setRevisions(nextRevs);
+      saveStoredRevisions(lecture.id, nextRevs);
+    }
+    onUpdateLecture({
+      ...lecture,
+      summaryMarkdown: editedMarkdown,
+      summaryHistory: nextRevs,
     });
     setIsEditingMarkdown(false);
   };
@@ -103,11 +369,12 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
     if (isExpandingNote) return;
     setIsExpandingNote(true);
     try {
+      const previousMarkdown = lecture.summaryMarkdown;
       const transcriptText = lecture.transcript.map(s => s.text).join('\n');
       const payload = JSON.stringify({
         title: lecture.title,
         subject: lecture.subject,
-        summaryMarkdown: lecture.summaryMarkdown,
+        summaryMarkdown: previousMarkdown,
         transcriptText,
         aiContext: (extraContext ?? customContextInput).trim()
       });
@@ -137,9 +404,32 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
       }
 
       if (data && data.summaryMarkdown) {
+        const newSummary = String(data.summaryMarkdown).slice(0, 100000);
+        setExpandProgress(100);
+        setExpandStageText('Готово! Подробный конспект успешно сформирован.');
+        await new Promise((r) => setTimeout(r, 450));
+
+        // Save previous (concise) version and the new expanded version into history
+        let nextRevs = [...revisions];
+        nextRevs = pushSummaryRevision(
+          nextRevs,
+          previousMarkdown,
+          nextRevs.length === 0 ? 'Исходная (лаконичная) версия' : `Версия до расширения #${nextRevs.length + 1}`
+        );
+        const aiExpansionNumber = nextRevs.filter((r) => r.label.includes('Подробная версия')).length + 1;
+        nextRevs = pushSummaryRevision(
+          nextRevs,
+          newSummary,
+          `Подробная версия (ИИ) #${aiExpansionNumber}`
+        );
+
+        setRevisions(nextRevs);
+        saveStoredRevisions(lecture.id, nextRevs);
+
         onUpdateLecture({
           ...lecture,
-          summaryMarkdown: String(data.summaryMarkdown).slice(0, 100000)
+          summaryMarkdown: newSummary,
+          summaryHistory: nextRevs,
         });
         setShowContextPrompt(false);
       }
@@ -318,11 +608,46 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
               
               {/* Toolbar for editing notes */}
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-medium text-neutral-400">
-                  Конспект занятия с формулами и определениями
-                </span>
-
                 <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-neutral-400">
+                    Конспект занятия с формулами и определениями
+                  </span>
+                  {revisions.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-md bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-400 font-mono">
+                      {countWords(lecture.summaryMarkdown)} слов
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {previousRevision && (
+                    <button
+                      onClick={handleRevertToPrevious}
+                      disabled={isExpandingNote || isEditingMarkdown}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-xs text-amber-300 font-medium transition-colors disabled:opacity-50"
+                      title={`Вернуться к версии: ${previousRevision.label} (${previousRevision.wordCount} слов)`}
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Вернуть предыдущую версию</span>
+                    </button>
+                  )}
+
+                  {revisions.length > 0 && (
+                    <button
+                      onClick={() => setShowHistoryPanel(prev => !prev)}
+                      disabled={isExpandingNote}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium transition-colors disabled:opacity-50 ${
+                        showHistoryPanel
+                          ? 'bg-indigo-950/60 border-indigo-500/50 text-indigo-200'
+                          : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-300'
+                      }`}
+                      title="История всех версий конспекта (лаконичных и подробных)"
+                    >
+                      <History className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>История версий ({revisions.length})</span>
+                    </button>
+                  )}
+
                   <button
                     onClick={() => setShowContextPrompt(prev => !prev)}
                     disabled={isExpandingNote || isEditingMarkdown}
@@ -330,7 +655,7 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
                     title="Ввести контекст/тему лекции и сгенерировать полный конспект"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Контекст для ИИ</span>
+                    <span>Контекст</span>
                   </button>
 
                   <button
@@ -352,7 +677,8 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
                         setIsEditingMarkdown(true);
                       }
                     }}
-                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs text-neutral-300 font-medium transition-colors"
+                    disabled={isExpandingNote}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs text-neutral-300 font-medium transition-colors disabled:opacity-50"
                   >
                     {isEditingMarkdown ? (
                       <>
@@ -368,6 +694,143 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
                   </button>
                 </div>
               </div>
+
+              {/* Progress Bar during AI Detailed Note Generation */}
+              {isExpandingNote && (
+                <div className="p-4 rounded-xl bg-neutral-900/95 border border-indigo-500/40 shadow-lg space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+                      <span className="text-xs font-semibold text-indigo-200">
+                        {expandStageText}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] font-mono text-neutral-400">
+                      <span>Прошло: {expandElapsedSeconds} сек</span>
+                      <span>·</span>
+                      <span>
+                        {expandProgress >= 100
+                          ? 'Завершено'
+                          : expandElapsedSeconds < 28
+                          ? `Осталось ~${Math.max(3, 30 - expandElapsedSeconds)} сек`
+                          : 'Финализация ответа...'}
+                      </span>
+                      <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-semibold">
+                        {expandProgress}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Visual progress track */}
+                  <div className="w-full h-2 rounded-full bg-neutral-950 border border-neutral-800 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-indigo-600 via-indigo-400 to-emerald-400 transition-all duration-500 ease-out rounded-full"
+                      style={{ width: `${Math.max(4, expandProgress)}%` }}
+                    />
+                  </div>
+
+                  {/* Stepper milestones */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+                    {[
+                      { threshold: 5, title: '1. Анализ стенограммы' },
+                      { threshold: 30, title: '2. Определения и теоремы' },
+                      { threshold: 60, title: '3. Вывод формул LaTeX' },
+                      { threshold: 82, title: '4. Примеры и верстка' },
+                    ].map((step, idx) => {
+                      const isDone = expandProgress >= step.threshold + 20 || expandProgress === 100;
+                      const isActive = expandProgress >= step.threshold && !isDone;
+                      return (
+                        <div
+                          key={idx}
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] flex items-center gap-1.5 transition-colors ${
+                            isDone
+                              ? 'bg-emerald-950/30 border-emerald-800/50 text-emerald-300'
+                              : isActive
+                              ? 'bg-indigo-950/50 border-indigo-500/50 text-indigo-200 font-medium'
+                              : 'bg-neutral-950/50 border-neutral-800/60 text-neutral-500'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${
+                            isDone ? 'bg-emerald-400' : isActive ? 'bg-indigo-400 animate-pulse' : 'bg-neutral-700'
+                          }`} />
+                          <span className="truncate">{step.title}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Version History Panel */}
+              {showHistoryPanel && revisions.length > 0 && (
+                <div className="p-4 rounded-xl bg-neutral-900/90 border border-neutral-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-xs font-semibold text-white flex items-center gap-1.5">
+                        <History className="w-3.5 h-3.5 text-indigo-400" />
+                        История изменений конспекта
+                      </h4>
+                      <p className="text-[11px] text-neutral-400 mt-0.5">
+                        Вы можете в любой момент переключиться обратно на исходную лаконичную версию или любую предыдущую редакцию.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setShowHistoryPanel(false)}
+                      className="text-xs text-neutral-400 hover:text-white px-2 py-1 rounded bg-neutral-800/60"
+                    >
+                      Закрыть
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                    {[...revisions].reverse().map((rev) => {
+                      const isCurrent = rev.summaryMarkdown.trim() === lecture.summaryMarkdown.trim();
+                      return (
+                        <div
+                          key={rev.id}
+                          className={`flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border transition-colors ${
+                            isCurrent
+                              ? 'bg-indigo-950/30 border-indigo-500/40'
+                              : 'bg-neutral-950/80 border-neutral-800/80 hover:border-neutral-700'
+                          }`}
+                        >
+                          <div className="space-y-0.5 min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-xs font-medium text-neutral-200">
+                                {rev.label}
+                              </span>
+                              {isCurrent && (
+                                <span className="px-2 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/30 text-[10px] font-semibold text-indigo-300">
+                                  Текущая версия
+                                </span>
+                              )}
+                              <span className="text-[11px] font-mono text-neutral-400">
+                                · {rev.wordCount} слов
+                              </span>
+                              <span className="text-[11px] text-neutral-500">
+                                · {rev.timestamp}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-neutral-400 truncate max-w-xl">
+                              {rev.summaryMarkdown.replace(/[#*$\\`_]/g, '').slice(0, 120)}...
+                            </p>
+                          </div>
+
+                          {!isCurrent && (
+                            <button
+                              onClick={() => handleRestoreRevision(rev)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-indigo-600 text-neutral-200 hover:text-white text-xs font-medium transition-colors shrink-0"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span>Восстановить эту версию</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* Context-driven regeneration box */}
               {(showContextPrompt || lecture.summaryMarkdown.includes('Аудиозапись сохранена')) && (
@@ -385,7 +848,7 @@ export const LectureViewer: React.FC<LectureViewerProps> = ({
                     value={customContextInput}
                     onChange={(e) => setCustomContextInput(e.target.value)}
                     rows={3}
-                    placeholder="Введите тему, термины, теоремы или план, которые вы писали в поле контекста..."
+                    placeholder="Повышает точность распознавания терминов и формул"
                     className="w-full px-3 py-2 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 resize-none"
                   />
                   <div className="flex justify-end gap-2">

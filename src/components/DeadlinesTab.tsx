@@ -104,7 +104,7 @@ export const DeadlinesTab: React.FC<DeadlinesTabProps> = ({
               Задачи и дедлайны
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
-              Домашние задания, даты коллоквиумов и сдачи работ (отсортированы по приоритету)
+              Домашние задания, даты сдачи работ
             </p>
           </div>
 

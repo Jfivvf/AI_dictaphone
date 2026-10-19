@@ -2,14 +2,11 @@ import React, { useState } from 'react';
 import { 
   Sliders, 
   Mic, 
-  Sparkles, 
-  Zap, 
   Volume2, 
   Keyboard, 
   CheckCircle2, 
   Save, 
-  ShieldCheck,
-  Check
+  ShieldCheck
 } from 'lucide-react';
 import { AppSettings } from '../types';
 
@@ -23,7 +20,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   onUpdateSettings,
 }) => {
   const [micDevice, setMicDevice] = useState('default');
-  const [accuracyMode, setAccuracyMode] = useState<'fast' | 'high'>('high');
   const [autoExtractTasks, setAutoExtractTasks] = useState(true);
   const [autoFormatLatex, setAutoFormatLatex] = useState(true);
   const [noiseFilter, setNoiseFilter] = useState(true);
@@ -33,7 +29,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     e.preventDefault();
     onUpdateSettings({
       ...settings,
-      asrModel: accuracyMode === 'high' ? 'faster-whisper-turbo' : 'whisper-cpp',
+      asrModel: 'faster-whisper-turbo',
       noiseSuppression: noiseFilter ? 'rnnoise' : 'off'
     });
     setIsSaved(true);
@@ -125,57 +121,6 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           </div>
 
-          {/* Section 2: Recognition Quality Modes (Human-friendly, zero jargon) */}
-          <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
-            <div className="flex items-center gap-2 pb-2 border-b border-neutral-800">
-              <Sparkles className="w-4 h-4 text-indigo-400" />
-              <h2 className="text-sm font-bold text-white">
-                Качество распознавания лекций
-              </h2>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div
-                onClick={() => setAccuracyMode('high')}
-                className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
-                  accuracyMode === 'high'
-                    ? 'bg-indigo-950/40 border-indigo-500 text-white'
-                    : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2 font-bold text-xs text-indigo-300">
-                    <Sparkles className="w-4 h-4" />
-                    Максимальная точность
-                  </div>
-                  {accuracyMode === 'high' && <Check className="w-4 h-4 text-indigo-400" />}
-                </div>
-                <p className="text-[11px] leading-relaxed text-neutral-300">
-                  Рекомендуется для физмата, химии и технических предметов. Безошибочно разбирает терминологию, формулы и фамилии ученых.
-                </p>
-              </div>
-
-              <div
-                onClick={() => setAccuracyMode('fast')}
-                className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
-                  accuracyMode === 'fast'
-                    ? 'bg-indigo-950/40 border-indigo-500 text-white'
-                    : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2 font-bold text-xs text-emerald-300">
-                    <Zap className="w-4 h-4" />
-                    Быстрый режим
-                  </div>
-                  {accuracyMode === 'fast' && <Check className="w-4 h-4 text-emerald-400" />}
-                </div>
-                <p className="text-[11px] leading-relaxed text-neutral-300">
-                  Мгновенная обработка с минимальным расходом батареи. Идеально для гуманитарных лекций и экономии ресурса ноутбука.
-                </p>
-              </div>
-            </div>
-          </div>
 
           {/* Section 3: Smart Assistance Toggles */}
           <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">

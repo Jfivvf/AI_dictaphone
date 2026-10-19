@@ -199,7 +199,7 @@ export const StorageTab: React.FC<StorageTabProps> = ({
             <div className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <div className="text-xs font-semibold text-neutral-200">
-                  Удалить аудиозаписи (оставив конспекты)
+                  Очистить аудиозаписи
                 </div>
                 <div className="text-[11px] text-neutral-400 mt-0.5">
                   Если на диске мало места, можно безопасно стереть тяжелые аудиофайлы. Текст конспекта и формулы не пострадают.

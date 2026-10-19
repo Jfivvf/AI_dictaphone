@@ -7,10 +7,11 @@ import {
   BookOpen,
   LogOut,
   LogIn,
-  Upload
+  Upload,
+  RotateCcw
 } from 'lucide-react';
 import { StudentProfile } from '../types';
-import { AxolotlLogo, setCustomAxaiLogo } from './AxolotlLogo';
+import { UserAvatar, cropAndCompressAvatarSquare256, setCustomAxaiLogo } from './AxolotlLogo';
 
 interface StudentProfileTabProps {
   profile: StudentProfile;
@@ -37,17 +38,32 @@ export const StudentProfileTab: React.FC<StudentProfileTabProps> = ({
     setFormData(profile);
   }, [profile]);
 
-  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const applyNewAvatar = (compressedDataUrl: string) => {
+    setCustomAxaiLogo(compressedDataUrl);
+    const updated: StudentProfile = {
+      ...formData,
+      avatarUrl: compressedDataUrl,
+    };
+    setFormData(updated);
+    onUpdateProfile(updated);
+    setIsSaved(true);
+    setTimeout(() => setIsSaved(false), 2000);
+  };
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setCustomAxaiLogo(reader.result);
-      }
-    };
-    reader.readAsDataURL(file);
+    try {
+      const square256 = await cropAndCompressAvatarSquare256(file);
+      applyNewAvatar(square256);
+    } catch (err) {
+      console.warn('Could not process avatar image:', err);
+    }
     e.target.value = '';
+  };
+
+  const handleResetAvatar = () => {
+    applyNewAvatar('');
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -117,7 +133,12 @@ export const StudentProfileTab: React.FC<StudentProfileTabProps> = ({
           
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 min-w-0 flex-1">
-              <AxolotlLogo className="w-16 h-16 rounded-2xl shadow-md" allowUploadOnClick={true} />
+              <UserAvatar
+                avatarUrl={formData.avatarUrl}
+                className="w-16 h-16 rounded-2xl shadow-md"
+                allowUploadOnClick={true}
+                onAvatarChange={applyNewAvatar}
+              />
 
               <div className="space-y-1 min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -141,7 +162,7 @@ export const StudentProfileTab: React.FC<StudentProfileTabProps> = ({
               </div>
             </div>
 
-            <div>
+            <div className="flex flex-wrap items-center gap-2">
               <input
                 ref={avatarInputRef}
                 type="file"
@@ -153,10 +174,22 @@ export const StudentProfileTab: React.FC<StudentProfileTabProps> = ({
                 type="button"
                 onClick={() => avatarInputRef.current?.click()}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-neutral-200 text-xs font-medium transition-colors"
+                title="Обрезается до квадрата 256×256 и сохраняется в профиле (не меняя системную иконку AxAI)"
               >
                 <Upload className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Загрузить свое фото / логотип</span>
+                <span>Сменить аватарку (256×256)</span>
               </button>
+              {formData.avatarUrl && (
+                <button
+                  type="button"
+                  onClick={handleResetAvatar}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-neutral-200 text-xs transition-colors"
+                  title="Сбросить аватарку к аксолотлю по умолчанию"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Сбросить</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

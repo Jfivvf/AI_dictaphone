@@ -39,9 +39,10 @@ async function transcribeWithChunkSupport(params: {
   subject: string;
   aiContext: string;
   liveTranscript?: string;
+  accuracyMode?: 'fast' | 'high';
   onStatusUpdate?: (msg: string) => void;
 }): Promise<any> {
-  const { base64Audio, mimeType, title, subject, aiContext, liveTranscript, onStatusUpdate } = params;
+  const { base64Audio, mimeType, title, subject, aiContext, liveTranscript, accuracyMode, onStatusUpdate } = params;
   const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB per chunk — safe for all reverse proxies (prevents HTTP 413)
 
   if (base64Audio.length > CHUNK_SIZE) {
@@ -61,7 +62,7 @@ async function transcribeWithChunkSupport(params: {
       }
     }
 
-    onStatusUpdate?.('Нейросетевое распознавание речи и создание подробного конспекта...');
+    onStatusUpdate?.('Глубокое распознавание речи и формирование академического конспекта...');
     const response = await fetch('/api/transcribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -72,6 +73,7 @@ async function transcribeWithChunkSupport(params: {
         subject,
         aiContext,
         liveTranscript,
+        accuracyMode,
       }),
     });
 
@@ -91,6 +93,7 @@ async function transcribeWithChunkSupport(params: {
         subject,
         aiContext,
         liveTranscript,
+        accuracyMode,
       }),
     });
 
@@ -176,8 +179,17 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         throw new Error('Ваш браузер или текущее окружение не поддерживает запись аудио через MediaDevices.');
       }
 
-      // 1. Request user microphone
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // 1. Request user microphone with explicit noise suppression and echo cancellation from settings
+      const isNoiseSuppressionOn = settings.noiseSuppression !== 'off';
+      const audioConstraints: MediaTrackConstraints = {
+        noiseSuppression: isNoiseSuppressionOn,
+        echoCancellation: isNoiseSuppressionOn,
+        autoGainControl: isNoiseSuppressionOn,
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraints,
+      });
       mediaStreamRef.current = stream;
 
       setRecordingState('recording');
@@ -507,6 +519,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
           subject: lectureSubject.trim(),
           aiContext: aiContext.trim(),
           liveTranscript: combinedBrowserTranscript,
+          accuracyMode: 'high',
           onStatusUpdate: setProcessingStatus,
         });
       } catch (err) {
@@ -771,7 +784,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-neutral-800">
           <div>
             <h1 className="text-xl font-bold text-white tracking-tight">
-              Запись лекции
+              Запись
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
               Запись с микрофона в реальном времени или загрузка аудиофайла
@@ -809,7 +822,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         {recordingState !== 'processing' && (
           <div className="p-5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-4">
             <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
-              Информация о занятии (необязательно)
+              Информация о занятии
             </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1030,11 +1043,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                  Контекст и термины для нейросети (необязательно)
+                  Контекст
                 </h3>
-                <span className="text-[11px] text-neutral-500">
-                  Повышает точность распознавания терминов и формул
-                </span>
               </div>
 
               <textarea
@@ -1042,7 +1052,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 onChange={(e) => setAiContext(e.target.value)}
                 rows={3}
                 maxLength={2000}
-                placeholder="Укажите сложные термины, фамилии ученых, обозначения или краткий план лекции (например: Уравнения Коши–Римана, контурный интеграл, теорема вычетов, аналитическая функция f(z))..."
+                placeholder="Повышает точность распознавания терминов и формул"
                 className="w-full px-3 py-2.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 leading-relaxed resize-none"
               />
             </div>
@@ -1113,11 +1123,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                  Контекст и термины для нейросети (необязательно)
+                  Контекст
                 </h3>
-                <span className="text-[11px] text-neutral-500">
-                  Повышает точность распознавания терминов и формул
-                </span>
               </div>
 
               <textarea
@@ -1125,7 +1132,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 onChange={(e) => setAiContext(e.target.value)}
                 rows={3}
                 maxLength={2000}
-                placeholder="Укажите сложные термины, фамилии ученых, обозначения или краткий план лекции..."
+                placeholder="Повышает точность распознавания терминов и формул"
                 className="w-full px-3 py-2.5 text-xs bg-neutral-950 border border-neutral-800 rounded-lg text-white focus:outline-none focus:border-indigo-500 leading-relaxed resize-none"
               />
             </div>

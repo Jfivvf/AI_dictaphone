@@ -101,31 +101,34 @@ function repairLatexControlChars(val: any): any {
 function parseJsonWithLatexSafe(rawText: string): any {
   const stripped = rawText.replace(/```json\s*|```/g, '').trim();
 
-  // Escape single backslashes before LaTeX commands that collide with JSON escape chars (\f, \b, \t, \r, \n)
+  // 1. First try native JSON.parse directly (works immediately when model properly escaped \\neg, \\equiv, \\to, etc.)
+  try {
+    return repairLatexControlChars(JSON.parse(stripped));
+  } catch {}
+
+  // 2. Escape ONLY single backslashes (neither preceded nor followed by another backslash) before LaTeX commands that collide with JSON escape chars (\f, \b, \t, \r, \n)
   const preSanitized = stripped.replace(
-    /(?<!\\)\\(frac|forall|flat|theta|tau|times|text|tilde|tan|tanh|top|triangle|to\b|therefore|beta|begin|binom|bar|bf|big|bullet|boxed|bot|backslash|boldsymbol|rho|right|rightarrow|rangle|rceil|rfloor|nabla|neq\b|nu\b|not\b|natural|nexists|notin)/g,
+    /(?<!\\)\\(?!\\)(frac|forall|flat|theta|tau|times|text|tilde|tan|tanh|top|triangle|to\b|therefore|beta|begin|binom|bar|bf|big|bullet|boxed|bot|backslash|boldsymbol|rho|right|rightarrow|rangle|rceil|rfloor|nabla|neq\b|nu\b|not\b|natural|nexists|notin)/g,
     '\\\\$1'
   );
 
-  // 1. Try JSON.parse on preSanitized string
   try {
     return repairLatexControlChars(JSON.parse(preSanitized));
+  } catch {}
+
+  // 3. Escape any single unescaped backslash (using negative lookbehind (?<!\\) so valid \\equiv is NEVER turned into \\\equiv)
+  const fixedBackslashes = preSanitized.replace(/(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
+  try {
+    return repairLatexControlChars(JSON.parse(fixedBackslashes));
   } catch {
-    // 2. Also escape any single backslash not followed by valid JSON escape chars
-    try {
-      const fixedBackslashes = preSanitized.replace(/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
-      return repairLatexControlChars(JSON.parse(fixedBackslashes));
-    } catch {
-      // 3. Extract the outermost {...} object and try again
-      const firstBrace = preSanitized.indexOf('{');
-      const lastBrace = preSanitized.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) {
-        const slice = preSanitized.slice(firstBrace, lastBrace + 1);
-        const fixedSlice = slice.replace(/\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})/g, '\\\\');
-        return repairLatexControlChars(JSON.parse(fixedSlice));
-      }
-      throw new Error('Could not parse JSON even after LaTeX backslash sanitization');
+    // 4. Extract outermost {...} object and try again
+    const firstBrace = fixedBackslashes.indexOf('{');
+    const lastBrace = fixedBackslashes.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const slice = fixedBackslashes.slice(firstBrace, lastBrace + 1);
+      return repairLatexControlChars(JSON.parse(slice));
     }
+    throw new Error('Could not parse JSON even after LaTeX backslash sanitization');
   }
 }
 
@@ -314,10 +317,57 @@ app.post('/api/transcribe', async (req, res) => {
       }
     }
 
+    const transcribeResponseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        summaryMarkdown: { type: Type.STRING },
+        actionItems: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              task: { type: Type.STRING },
+              deadline: { type: Type.STRING },
+              priority: { type: Type.STRING },
+            },
+            required: ['task', 'deadline', 'priority'],
+          },
+        },
+        latexFormulas: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              latex: { type: Type.STRING },
+              context: { type: Type.STRING },
+            },
+            required: ['title', 'latex', 'context'],
+          },
+        },
+        segments: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              startTime: { type: Type.NUMBER },
+              endTime: { type: Type.NUMBER },
+              speaker: { type: Type.STRING },
+              text: { type: Type.STRING },
+            },
+            required: ['startTime', 'endTime', 'speaker', 'text'],
+          },
+        },
+        fullText: { type: Type.STRING },
+      },
+      required: ['summaryMarkdown', 'actionItems', 'latexFormulas', 'segments', 'fullText'],
+    };
+
+    // Maximum accuracy mode: prioritizes deep reasoning, comprehensive coverage, and precise LaTeX formulas
     const candidateModels = [
+      'gemini-flash-latest',
       'gemini-3.5-transcribe',
       'gemini-3.8-flash',
-      'gemini-flash-latest',
       'gemini-3.1-flash-lite',
     ];
 
@@ -340,6 +390,7 @@ app.post('/api/transcribe', async (req, res) => {
           ],
           config: {
             responseMimeType: 'application/json',
+            responseSchema: transcribeResponseSchema,
             maxOutputTokens: 16384,
           },
         });
@@ -357,18 +408,72 @@ app.post('/api/transcribe', async (req, res) => {
       throw lastError;
     }
 
+    let parsed: any;
     try {
-      const parsed = parseJsonWithLatexSafe(responseText);
-      return streamHelper.sendJson(parsed);
+      parsed = parseJsonWithLatexSafe(responseText);
     } catch {
-      return streamHelper.sendJson({
+      parsed = {
         fullText: responseText,
         summaryMarkdown: `## Конспект лекции\n\n${responseText}`,
         segments: [{ startTime: 0, endTime: 10, speaker: 'Лектор', text: responseText }],
         actionItems: [],
         latexFormulas: [],
-      });
+      };
     }
+
+    // Stage 2: In maximum accuracy mode, if the initial summary from the multimodal audio pass is condensed (< 3200 chars),
+    // automatically run the dedicated academic note expansion pass so the very first summary is deep, rigorous, and complete.
+    const currentSummary = String(parsed?.summaryMarkdown || '').trim();
+    const fullTranscriptText =
+      String(parsed?.fullText || '').trim() ||
+      (Array.isArray(parsed?.segments) ? parsed.segments.map((s: any) => s.text).join('\n') : '') ||
+      String(liveTranscript || '').trim();
+
+    if (currentSummary.length < 3200 && (currentSummary || fullTranscriptText)) {
+      try {
+        const enrichPrompt = `Ты — ведущий университетский профессор по дисциплине "${subject || 'Высшая школа'}".
+Тема лекции: "${title || 'Лекция'}".${contextInstruction}
+На основе расшифровки аудиозаписи лекции и чернового плана ниже напиши ФУНДАМЕНТАЛЬНЫЙ, МАКСИМАЛЬНО ПОДРОБНЫЙ и РАЗВЕРНУТЫЙ академический конспект в формате Markdown (с формулами LaTeX $...$ и $$...$$).
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО делать краткую сводку! Разверни каждое определение, теорему, доказательство, свойство и пример так, чтобы по конспекту можно было сдать экзамен на отлично.
+
+Обязательная структура из 6 разделов:
+## 1. Введение и контекст темы
+## 2. Ключевые понятия и строгие определения
+## 3. Подробный теоретический разбор (по подразделам ###)
+## 4. Математический аппарат, формулы и выводы (в синтаксисе LaTeX $...$ и $$...$$ с расшифровкой всех переменных)
+## 5. Разобранные примеры и практическое применение
+## 6. Итоговые выводы и контрольные вопросы к экзамену (с развернутыми ответами)
+
+Верни ТОЛЬКО готовый текст конспекта в формате Markdown (без JSON-обертки).
+
+Черновой конспект из аудио:
+${currentSummary.slice(0, 15000)}
+
+Полная расшифровка лекции:
+${fullTranscriptText.slice(0, 35000)}`;
+
+        for (const enrichModel of ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite']) {
+          try {
+            const enrichResp = await ai.models.generateContent({
+              model: enrichModel,
+              contents: [{ role: 'user', parts: [{ text: enrichPrompt }] }],
+              config: { maxOutputTokens: 12288 },
+            });
+            const enrichedMd = (enrichResp.text || '').trim();
+            if (enrichedMd && enrichedMd.length > currentSummary.length) {
+              parsed.summaryMarkdown = repairLatexControlChars(enrichedMd);
+              break;
+            }
+          } catch {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+        }
+      } catch (enrichErr) {
+        console.warn('Auto summary enrichment skipped:', enrichErr);
+      }
+    }
+
+    return streamHelper.sendJson(parsed);
   } catch (error: any) {
     console.error('Transcription error:', error);
     return streamHelper.sendJson({ error: error.message || 'Ошибка распознавания аудио' });

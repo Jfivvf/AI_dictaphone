@@ -1,45 +1,24 @@
-# AxAI — Десктопная версия на Python + PySide6
+# AxAI — Нативное десктопное приложение на Python + PySide6
 
-В папке `python_desktop/` представлены **два готовых способа запуска десктопного приложения на Python + PySide6**:
+Проект организован по модульной архитектуре (в соответствии с архитектурным ревью):
 
----
+## Структура пакетов `python_desktop/`
+- **`main.py`** — главное окно нативного десктопного приложения (`PySide6.QtWidgets` + встроенный рендерер формул `LatexLecturePreview`).
+- **`db/repositories.py`** — слой репозиториев SQLite (`DatabaseManager`, `LectureRepository`, `TaskRepository`, `RevisionRepository`, `ProfileRepository`, `SettingsRepository`):
+  - Точечные транзакционные `INSERT ... ON CONFLICT(id) DO UPDATE` вместо полного `DELETE FROM lectures/tasks`.
+  - Полнотекстовый поиск **SQLite FTS5** (`lectures_fts`) по заголовкам, предметам и конспектам.
+  - Таблица `lecture_revisions` для сохранения истории версий конспекта при каждом нажатии **«✨ Сделать подробнее (ИИ)»** и возврата к лаконичной версии в 1 клик.
+  - Отдельное хранение сжатой квадратной аватарки пользователя (`256×256 PNG` в `student_profile.avatar_blob`), не затрагивающее системную иконку приложения AxAI.
+- **`ml/engine.py`** — единые интерфейсы `BaseTranscriber` и `BaseSummarizer` с двумя реализациями:
+  - **Локальная (100% офлайн):** `FasterWhisperTranscriber` (с Silero VAD и поддержкой лекций >1.5 ч) + `LocalLlmSummarizer` (Ollama `qwen2.5:7b` с **Map-Reduce** конспектированием по блокам и строгой JSON-схемой для дедлайнов и формул).
+  - **Облачная:** `GeminiCloudTranscriber` + `GeminiCloudSummarizer` (`gemini-2.5-flash` со строгой `response_schema`).
+  - **`HardwareInspector`** — автопроверка CPU, RAM, NVIDIA CUDA / Apple Metal (MPS) и локального сервера Ollama с рекомендацией оптимальной модели.
+- **`export/exporters.py`** — рендеринг формул $\LaTeX$ (поддержка локального KaTeX в `~/AxAI_Storage/katex/` без CDN + встроенный 100% офлайн математический типограф), экспорт в `.PDF`, `.MD` (UTF-8 BOM) и `.TEX`.
+- **`ui/latex_preview.py`** — виджет `LatexLecturePreview` (`QWebEngineView` с автоматическим откатом на `QTextBrowser`), генератор неизменной иконки приложения `draw_fixed_app_icon_pixmap()` и функция обрезки пользовательской аватарки `crop_and_compress_avatar_square(256)`.
 
-## Вариант 1: Десктопное окно PySide6, на 100% идентичное веб-версии (`axai_webview_desktop.py`)
-
-Этот скрипт открывает **нативное окно Python + PySide6 (`QMainWindow` + `QWebEngineView`)**, автоматически запускает локальный сервер проекта и отображает **ровно тот же самый интерфейс AxAI (1-в-1 до каждого пикселя)** с облачной базой данных Firebase Firestore, формулами KaTeX, микрофоном и скачиванием `.pdf`, `.md`, `.tex`.
-
-### Запуск:
-1. В корне проекта установите зависимости веб-сервера (один раз):
-   ```bash
-   npm install
-   ```
-2. Установите `PySide6`:
-   ```bash
-   pip install -r python_desktop/requirements.txt
-   ```
-3. Запустите десктопное приложение на Python:
-   ```bash
-   python python_desktop/axai_webview_desktop.py
-   ```
-
----
-
-## Вариант 2: Автономное нативное приложение на чистых виджетах `PySide6.QtWidgets` (`main.py`)
-
-Если требуется показать классическую архитектуру `PySide6.QtWidgets` без браузерного движка (нативные виджеты `QMainWindow`, `QStackedWidget`, `QThread`, `QPrinter`, `QPainter`), используйте `main.py`.
-
-В нем реализованы все функции **AxAI**:
-- Фирменный логотип розового аксолотля **AxAI** (с возможностью выбрать свою оригинальную картинку `5341532723484501807.jpg` по клику на логотип или в профиле).
-- Запись лекций с микрофона (`sounddevice` + `QThread`) и распознавание через `faster-whisper` + `google-genai`.
-- Умный импорт **PDF / Markdown** (`pdf_importer.py`) с автоматическим определением структуры документа.
-- Кнопка **«✨ Сделать подробнее (ИИ)»** внутри просмотра лекции.
-- Экспорт в **`.PDF` (`QPrinter`), `.MD` (с UTF-8 BOM) и `.TEX` (с полной конвертацией конспекта и формул в LaTeX)**.
-- Трекер **«Дедлайны и задачи»** с интерактивным выбором приоритета (**Высокий / Обычный / Низкий**) и автосортировкой.
-
-### Запуск:
+## Запуск нативного десктопного приложения
 ```bash
 cd python_desktop
 pip install -r requirements.txt
 python main.py
 ```
-*(Опционально: задайте переменную окружения `GEMINI_API_KEY="ваш_ключ"` для работы ИИ-структуризации и кнопки «Сделать подробнее»).*

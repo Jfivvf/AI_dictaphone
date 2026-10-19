@@ -59,7 +59,7 @@ export const LectureHistory: React.FC<LectureHistoryProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-neutral-800">
           <div>
             <h1 className="text-xl font-bold text-white tracking-tight">
-              Мои лекции
+              Мои проекты
             </h1>
             <p className="text-xs text-neutral-400 mt-1">
               Архив всех сохраненных записей и конспектов ({lectures.length})
