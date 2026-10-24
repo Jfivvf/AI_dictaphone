@@ -1,4 +1,3 @@
-"""Пакет работы с локальной базой данных SQLite (репозитории, FTS5-поиск, транзакции)."""
 from .repositories import (
     DatabaseManager,
     LectureRepository,
@@ -8,6 +7,8 @@ from .repositories import (
     SettingsRepository,
 )
 
+from .bookmarks import BookmarkRepository
+
 __all__ = [
     "DatabaseManager",
     "LectureRepository",
@@ -15,4 +16,5 @@ __all__ = [
     "RevisionRepository",
     "ProfileRepository",
     "SettingsRepository",
+    "BookmarkRepository",
 ]
