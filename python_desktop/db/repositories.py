@@ -18,8 +18,6 @@ from typing import List, Dict, Any, Optional
 
 
 class DatabaseManager:
-    """Управляет подключением к SQLite, миграциями схемы и полнотекстовым индексом FTS5."""
-
     def __init__(self, storage_path: str):
         self.storage_path = storage_path
         os.makedirs(self.storage_path, exist_ok=True)
@@ -37,7 +35,7 @@ class DatabaseManager:
         with self.get_connection() as conn:
             cur = conn.cursor()
 
-            # 1. Профиль студента с отдельным полем avatar_blob (256x256 PNG)
+            # Профиль
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS student_profile (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -51,7 +49,6 @@ class DatabaseManager:
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # Миграция для существующих БД, где еще не было колонок semester и avatar_blob
             existing_cols = {
                 row["name"] for row in cur.execute("PRAGMA table_info(student_profile)").fetchall()
             }
@@ -60,7 +57,7 @@ class DatabaseManager:
             if "avatar_blob" not in existing_cols:
                 cur.execute("ALTER TABLE student_profile ADD COLUMN avatar_blob BLOB DEFAULT NULL")
 
-            # 2. Таблица лекций
+            # Список лекций
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS lectures (
                     id TEXT PRIMARY KEY,
@@ -93,7 +90,7 @@ class DatabaseManager:
                 if col_name not in lec_cols:
                     cur.execute(f"ALTER TABLE lectures ADD COLUMN {col_name} {col_def}")
 
-            # 3. Таблица задач и дедлайнов
+            # 3. Список задач и дедлайнов
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -106,7 +103,7 @@ class DatabaseManager:
                 )
             """)
 
-            # 4. Таблица истории версий конспекта (для кнопки «Сделать подробнее (ИИ)» и отката)
+            # Таблица истории версий конспекта
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS lecture_revisions (
                     id TEXT PRIMARY KEY,
@@ -120,7 +117,7 @@ class DatabaseManager:
                 )
             """)
 
-            # 5. Настройки приложения (выбор локальной/облачной модели, VAD, чанкинг)
+            # Настройки приложения
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY,
@@ -128,7 +125,7 @@ class DatabaseManager:
                 )
             """)
 
-            # 6. Полнотекстовый поиск FTS5 по лекциям
+            # поиск FTS5 по лекциям
             try:
                 cur.execute("""
                     CREATE VIRTUAL TABLE IF NOT EXISTS lectures_fts USING fts5(
@@ -140,7 +137,6 @@ class DatabaseManager:
                     )
                 """)
             except sqlite3.OperationalError:
-                # Если сборка SQLite без FTS5 — поиск будет автоматически работать через LIKE
                 pass
 
             conn.commit()
@@ -154,8 +150,6 @@ def _count_words(text: str) -> int:
 
 
 class RevisionRepository:
-    """Репозиторий истории изменений конспекта (позволяет вернуться к лаконичной версии)."""
-
     def __init__(self, db: DatabaseManager):
         self.db = db
 
@@ -211,8 +205,6 @@ class RevisionRepository:
 
 
 class TaskRepository:
-    """Точечные транзакционные операции над задачами и дедлайнами без пересоздания таблиц."""
-
     def __init__(self, db: DatabaseManager):
         self.db = db
 
@@ -281,11 +273,6 @@ class TaskRepository:
 
 
 class LectureRepository:
-    """
-    Репозиторий лекций с точечным `INSERT ... ON CONFLICT DO UPDATE`,
-    поддержкой полнотекстового поиска FTS5 и синхронизацией задач/истории версий.
-    """
-
     def __init__(self, db: DatabaseManager):
         self.db = db
         self.task_repo = TaskRepository(db)
@@ -336,7 +323,6 @@ class LectureRepository:
             return lectures
 
     def upsert_lecture(self, lec: Dict[str, Any]) -> Dict[str, Any]:
-        """Точечное сохранение/обновление одной лекции и её задач в одной транзакции."""
         now_ts = int(datetime.now().timestamp())
         lec_id = lec.get("id") or f"lec-{now_ts}"
         lec["id"] = lec_id
@@ -386,7 +372,6 @@ class LectureRepository:
                 ),
             )
 
-            # Синхронизируем задачи только этой лекции
             incoming_tasks = lec.get("tasks", [])
             incoming_ids = set()
             for idx, t in enumerate(incoming_tasks):
@@ -422,7 +407,6 @@ class LectureRepository:
             else:
                 cur.execute("DELETE FROM tasks WHERE lecture_id = ?", (lec_id,))
 
-            # Обновляем индекс полнотекстового поиска FTS5
             try:
                 cur.execute("DELETE FROM lectures_fts WHERE lecture_id = ?", (lec_id,))
                 cur.execute(
@@ -461,7 +445,6 @@ class LectureRepository:
         if not q:
             return all_lecs
 
-        # Пробуем быстрый поиск через FTS5
         try:
             with self.db.get_connection() as conn:
                 safe_fts = '"' + q.replace('"', '""') + '"*'
@@ -475,7 +458,6 @@ class LectureRepository:
         except Exception:
             pass
 
-        # Fallback: регистронезависимый поиск по подстроке
         q_low = q.lower()
         return [
             l for l in all_lecs
@@ -487,12 +469,6 @@ class LectureRepository:
 
 
 class ProfileRepository:
-    """
-    Репозиторий профиля студента.
-    Хранит академические данные и отдельную пользовательскую аватарку (обрезанную до квадрата 256x256
-    в поле `avatar_blob` SQLite + кэш-файл `user_avatar_256.png`), не затрагивая иконку приложения AxAI.
-    """
-
     def __init__(self, db: DatabaseManager):
         self.db = db
         self.avatar_cache_path = os.path.join(self.db.storage_path, "user_avatar_256.png")
@@ -503,7 +479,6 @@ class ProfileRepository:
                 "SELECT name, email, university, faculty, group_name, semester, avatar_blob FROM student_profile WHERE id = 1"
             ).fetchone()
             if row:
-                # Если в БД есть BLOB аватарки, синхронизируем локальный кэш-файл
                 if row["avatar_blob"] and not os.path.exists(self.avatar_cache_path):
                     try:
                         with open(self.avatar_cache_path, "wb") as f:
@@ -559,11 +534,9 @@ class ProfileRepository:
             conn.commit()
 
     def save_avatar_bytes(self, png_bytes: bytes) -> None:
-        """Сохраняет сжатый квадрат 256x256 аватарки в SQLite BLOB и на диск."""
         with open(self.avatar_cache_path, "wb") as f:
             f.write(png_bytes)
         with self.db.get_connection() as conn:
-            # Гарантируем наличие строки профиля id=1
             self.get_profile()
             conn.execute(
                 "UPDATE student_profile SET avatar_blob = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
@@ -572,7 +545,6 @@ class ProfileRepository:
             conn.commit()
 
     def clear_avatar(self) -> None:
-        """Сбрасывает пользовательскую аватарку к дефолтному аксолотлю."""
         if os.path.exists(self.avatar_cache_path):
             try:
                 os.remove(self.avatar_cache_path)
@@ -597,18 +569,18 @@ class ProfileRepository:
 
 
 class SettingsRepository:
-    """Хранение настроек ИИ-движка (локальный / облачный), модели Whisper, Ollama и VAD в SQLite."""
-
     DEFAULTS = {
-        "transcriber_backend": "auto",        # "auto" | "local_whisper" | "gemini_cloud"
-        "summarizer_backend": "auto",         # "auto" | "local_ollama" | "gemini_cloud"
-        "whisper_model_size": "auto",         # "auto" | "large-v3-turbo" | "small" | "base"
-        "ollama_model": "qwen2.5:7b",         # локальная модель в Ollama
-        "ollama_url": "http://localhost:11434",
-        "silero_vad": True,
-        "auto_extract_tasks": True,
-        "chunk_minutes": 10,                  # нарезка длинных лекций (>1 часа) по 10 минут
-    }
+       "transcriber_backend": "local_whisper",
+       "summarizer_backend": "auto",
+       "allow_cloud_fallback": False,
+       "whisper_model_size": "auto",
+       "ollama_model": "qwen2.5:7b",
+       "ollama_url": "http://localhost:11434",
+       "ollama_num_ctx": 16384,
+       "ollama_timeout": 600,
+       "silero_vad": True,
+       "auto_extract_tasks": True,
+   }
 
     def __init__(self, db: DatabaseManager):
         self.db = db
