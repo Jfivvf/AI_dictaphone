@@ -1,15 +1,3 @@
-"""
-Слой репозиториев SQLite для нативного десктопного приложения AxAI (Python + PySide6).
-
-Реализует рекомендации код-ревью:
-1. Никаких полных `DELETE FROM lectures` / `DELETE FROM tasks` при каждом сохранении:
-   используются точечные транзакционные `INSERT ... ON CONFLICT(id) DO UPDATE`.
-2. Полнотекстовый поиск SQLite FTS5 (`lectures_fts`) по заголовкам, предметам и тексту конспектов.
-3. Хранение истории версий конспекта (`lecture_revisions`) при каждом нажатии «Сделать подробнее (ИИ)»
-   или ручном редактировании с возможностью отката к лаконичной версии.
-4. Отдельное хранение аватарки пользователя в таблице `student_profile` (`avatar_blob BLOB`, сжатая
-   и обрезанная до квадрата 256x256 PNG), не затрагивающее системную иконку приложения AxAI.
-"""
 import os
 import json
 import sqlite3
@@ -496,12 +484,12 @@ class ProfileRepository:
                 }
 
         default_profile = {
-            "name": "Алексей Смирнов",
+            "name": "Иван Иванов",
             "email": "student@university.ru",
-            "university": "МГУ им. М. В. Ломоносова",
-            "faculty": "Механико-математический факультет",
-            "group": "204-Б",
-            "semester": 3,
+            "university": "НИЯУ МИФИ",
+            "faculty": "Институт Лазерных и Плазменных технологий",
+            "group": "Б26-205",
+            "semester": 1,
             "has_custom_avatar": False,
         }
         self.save_profile(default_profile)
