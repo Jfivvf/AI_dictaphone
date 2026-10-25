@@ -6,6 +6,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from audio_decode import decode_audio_16k
 from export.exporters import repair_corrupted_latex
 
 ProgressCallback = Callable[[int, str], None]
@@ -22,6 +23,8 @@ class CancelledError(Exception):
 
 @dataclass
 class LectureContext:
+    pass
+
     subject: str = ""
     title: str = ""
     lecturer: str = ""
@@ -64,7 +67,6 @@ def extract_terms(notes: str, limit: int = 25) -> List[str]:
 
 
 def build_asr_prompts(ctx: LectureContext) -> Tuple[str, str]:
-    """Возвращает (initial_prompt, hotwords) для faster-whisper."""
     head = ". ".join(p.strip() for p in (ctx.subject, ctx.title) if p.strip())
     notes = re.sub(r"\s+", " ", ctx.notes or "").strip()
     initial = " ".join(p for p in (head + "." if head else "", notes) if p)[:600]
@@ -112,8 +114,6 @@ def parse_json_with_latex_safe(raw_text: str) -> Dict[str, Any]:
         if isinstance(data, dict):
             return _repair_strings(data)
     return {}
-
-
 
 
 def chunk_text(text: str, size: int) -> List[str]:
@@ -299,6 +299,10 @@ class FasterWhisperTranscriber(BaseTranscriber):
         self.beam_size = beam_size
 
     def transcribe(self, audio_path, ctx, progress_cb=None, cancel_cb=None):
+        if progress_cb:
+            progress_cb(10, "Чтение аудиофайла...")
+        audio = decode_audio_16k(audio_path)
+
         hw = HardwareInspector.hardware()
         model_name = hw["recommended_whisper"] if self.model_size == "auto" else self.model_size
         device = "cuda" if hw["has_cuda"] else "cpu"
@@ -324,10 +328,10 @@ class FasterWhisperTranscriber(BaseTranscriber):
         if progress_cb:
             progress_cb(22, "Распознавание речи" + (" с учётом контекста..." if hotwords or initial_prompt else "..."))
         try:
-            segments_iter, info = model.transcribe(audio_path, **options)
+            segments_iter, info = model.transcribe(audio, **options)
         except TypeError:
             options.pop("hotwords", None)
-            segments_iter, info = model.transcribe(audio_path, **options)
+            segments_iter, info = model.transcribe(audio, **options)
 
         total = max(1.0, float(getattr(info, "duration", 0.0) or 1.0))
         segments: List[Dict[str, Any]] = []
@@ -352,6 +356,7 @@ class FasterWhisperTranscriber(BaseTranscriber):
                     f"Распознавание речи: {int(seg.end // 60)} из {max(1, int(total // 60))} мин ({int(ratio * 100)}%)...",
                 )
         return {"full_text": " ".join(parts).strip(), "segments": segments}
+
 
 
 class BaseSummarizer(ABC):
@@ -517,7 +522,7 @@ class LocalLlmSummarizer(BaseSummarizer):
         for _ in range(4):
             if len("\n\n".join(notes)) <= self.INPUT_BUDGET or len(notes) < 2:
                 break
-            self._report(progress_cb, 82, "сжатие промежуточных конспектов...")
+            self._report(progress_cb, 82, "Локальная LLM: сжатие промежуточных конспектов...")
             groups: List[List[str]] = []
             current: List[str] = []
             size = 0
@@ -632,6 +637,7 @@ def create_transcriber(settings: Dict[str, Any]) -> BaseTranscriber:
 
 
 def create_summarizer(settings: Dict[str, Any]) -> BaseSummarizer:
+    """Возвращает локальный конспектор на базе Ollama. Данные не покидают компьютер."""
     url = settings.get("ollama_url", "http://localhost:11434")
     wanted = settings.get("ollama_model", "qwen2.5:7b")
     online, installed = check_ollama(url)
