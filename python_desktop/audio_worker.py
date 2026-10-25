@@ -11,25 +11,7 @@ from ml.engine import (
     create_transcriber,
 )
 from pdf_importer import DocumentError, keyword_tasks_and_formulas, read_document
-
-_TASK_WORDS = ("сдать", "домашн", "задание", "дедлайн", "коллоквиум", "экзамен", "лабораторн", "срок")
-_URGENT_WORDS = ("срочн", "экзамен", "коллоквиум", "контрольн")
-
-
-def _keyword_tasks(text: str) -> List[Dict[str, Any]]:
-    tasks: List[Dict[str, Any]] = []
-    for sentence in (text or "").split("."):
-        clean = sentence.strip()
-        lower = clean.lower()
-        if len(clean) > 10 and any(w in lower for w in _TASK_WORDS):
-            tasks.append({
-                "id": f"task-{len(tasks)}",
-                "task": clean,
-                "deadline": "К следующему занятию",
-                "completed": False,
-                "priority": "high" if any(w in lower for w in _URGENT_WORDS) else "medium",
-            })
-    return tasks[:10]
+from task_detection import extract_tasks
 
 
 class TranscriptionWorker(QThread):
@@ -106,13 +88,13 @@ class TranscriptionWorker(QThread):
                     warning = f"Конспект не построен: {err}"
 
             if not summary_md:
-                notes = f"\n\n### Контекст студента\n{self.ctx.notes}\n" if self.ctx.notes else ""
+                notes = f"\n\n### Контекст \n{self.ctx.notes}\n" if self.ctx.notes else ""
                 summary_md = (
                     f"## {self.title}\n\n**Предмет:** {self.subject}{notes}\n\n"
                     f"### Стенограмма\n\n{full_text or 'Речь не распознана.'}"
                 )
                 if self.settings.get("auto_extract_tasks", True):
-                    tasks = _keyword_tasks(full_text)
+                    tasks = extract_tasks(full_text)
 
             self.progress.emit(100, "Готово!")
             self.finished.emit({
