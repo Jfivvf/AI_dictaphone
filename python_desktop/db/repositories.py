@@ -558,6 +558,7 @@ class ProfileRepository:
 
 class SettingsRepository:
     DEFAULTS = {
+       "theme": "dark",
        "transcriber_backend": "local_whisper",
        "summarizer_backend": "auto",
        "allow_cloud_fallback": False,
