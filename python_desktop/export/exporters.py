@@ -1,25 +1,13 @@
-"""
-Модуль экспорта (.PDF, .MD, .TEX) и офлайн-рендеринга математических формул LaTeX для AxAI (Python + PySide6).
-
-Реализует рекомендации код-ревью:
-1. Полноценный рендеринг формул LaTeX ($...$ и $$...$$) в нативном приложении и при экспорте в PDF:
-   - Поддерживает локально закэшированный KaTeX в `~/AxAI_Storage/katex/` (без зависимости от CDN).
-   - Имеет встроенный автономный математический типограф `format_latex_math_offline()`, который
-     мгновенно превращает выражения LaTeX (`\\frac{a}{b}`, `\\neg x \\equiv x \\to 0`, `S_1`, `x^2`,
-     греческие буквы, интегралы, суммы, кванторы, штрих Шеффера, стрелку Пирса) в чистую математическую
-     HTML-верстку — работает 100% офлайн и в `QWebEngineView`, и в `QTextBrowser`, и в `QPrinter` PDF!
-2. Автоматическая распаковка «сырого» JSON (`{"summaryMarkdown": ...}`), если нейросеть вернула JSON-строку.
-"""
-import os
-import re
 import html
 import json
-import urllib.request
-from typing import Dict, Any, List, Optional
+import re
+from pathlib import Path
+from string import Template
+from typing import Any, Dict, List, Optional
+import markdown as md_lib
 
 
 def repair_corrupted_latex(text: str) -> str:
-    """Восстанавливает LaTeX-команды (\\frac, \\beta, \\theta, \\times, \\right, \\nabla, \\equiv)."""
     if not text:
         return ""
     s = str(text)
@@ -33,11 +21,12 @@ def repair_corrupted_latex(text: str) -> str:
     return s
 
 
+def normalize_math_delimiters(text: str) -> str:
+    text = re.sub(r"\\\[([\s\S]*?)\\\]", lambda m: f"\n$$\n{m.group(1).strip()}\n$$\n", text)
+    return re.sub(r"\\\(([\s\S]*?)\\\)", lambda m: f"${m.group(1).strip()}$", text)
+
+
 def unpack_raw_json_lecture_if_needed(lec: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Если в поле `text` лекции случайно сохранился сырой JSON (`{"summaryMarkdown": "...", ...}`),
-    автоматически распаковывает конспект, задачи, формулы и сегменты стенограммы.
-    """
     raw_text = (lec.get("text") or "").strip()
     if '"summaryMarkdown"' not in raw_text:
         return lec
@@ -53,12 +42,12 @@ def unpack_raw_json_lecture_if_needed(lec: Dict[str, Any]) -> Dict[str, Any]:
         parsed = json.loads(fixed)
     except Exception:
         return lec
-
     if not isinstance(parsed, dict):
         return lec
 
-    if isinstance(parsed.get("summaryMarkdown"), str) and parsed["summaryMarkdown"].strip():
-        lec["text"] = repair_corrupted_latex(parsed["summaryMarkdown"].strip())
+    summary = parsed.get("summaryMarkdown")
+    if isinstance(summary, str) and summary.strip():
+        lec["text"] = repair_corrupted_latex(summary.strip())
 
     raw_items = parsed.get("actionItems") or parsed.get("tasks") or []
     if isinstance(raw_items, list) and raw_items and not lec.get("tasks"):
@@ -99,402 +88,270 @@ def unpack_raw_json_lecture_if_needed(lec: Dict[str, Any]) -> Dict[str, Any]:
             for idx, s in enumerate(raw_segs)
             if isinstance(s, dict) and s.get("text")
         ]
-
     return lec
 
 
-# Таблица математических символов LaTeX -> Unicode для 100% офлайн-рендеринга
-LATEX_SYMBOLS = {
-    r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ", r"\epsilon": "ε",
-    r"\varepsilon": "ε", r"\zeta": "ζ", r"\eta": "η", r"\theta": "θ", r"\vartheta": "ϑ",
-    r"\iota": "ι", r"\kappa": "κ", r"\lambda": "λ", r"\mu": "μ", r"\nu": "ν",
-    r"\xi": "ξ", r"\pi": "π", r"\rho": "ρ", r"\sigma": "σ", r"\tau": "τ",
-    r"\upsilon": "υ", r"\phi": "φ", r"\varphi": "ϕ", r"\chi": "χ", r"\psi": "ψ",
-    r"\omega": "ω", r"\Gamma": "Γ", r"\Delta": "Δ", r"\Theta": "Θ", r"\Lambda": "Λ",
-    r"\Xi": "Ξ", r"\Pi": "Π", r"\Sigma": "Σ", r"\Phi": "Φ", r"\Psi": "Ψ", r"\Omega": "Ω",
-    r"\equiv": "≡", r"\approx": "≈", r"\neq": "≠", r"\ne": "≠", r"\leq": "≤", r"\le": "≤",
-    r"\geq": "≥", r"\ge": "≥", r"\ll": "≪", r"\gg": "≫", r"\pm": "±", r"\mp": "∓",
-    r"\times": "×", r"\cdot": "·", r"\div": "÷", r"\ast": "∗", r"\star": "⋆",
-    r"\circ": "∘", r"\bullet": "•", r"\oplus": "⊕", r"\otimes": "⊗",
-    r"\neg": "¬", r"\lnot": "¬", r"\land": "∧", r"\wedge": "∧", r"\lor": "∨", r"\vee": "∨",
-    r"\to": "→", r"\rightarrow": "→", r"\leftarrow": "←", r"\leftrightarrow": "↔",
-    r"\Rightarrow": "⇒", r"\Leftarrow": "⇐", r"\Leftrightarrow": "⇔", r"\iff": "⟺",
-    r"\implies": "⟹", r"\downarrow": "↓", r"\uparrow": "↑", r"\mid": "∣",
-    r"\forall": "∀", r"\exists": "∃", r"\nexists": "∄", r"\in": "∈", r"\notin": "∉",
-    r"\subset": "⊂", r"\subseteq": "⊆", r"\supset": "⊃", r"\supseteq": "⊇",
-    r"\cup": "∪", r"\cap": "∩", r"\setminus": "∖", r"\emptyset": "∅", r"\varnothing": "∅",
-    r"\infty": "∞", r"\partial": "∂", r"\nabla": "∇", r"\int": "∫", r"\iint": "∬",
-    r"\iiint": "∭", r"\oint": "∮", r"\sum": "∑", r"\prod": "∏", r"\sqrt": "√",
-    r"\propto": "∝", r"\angle": "∠", r"\perp": "⊥", r"\parallel": "∥",
-    r"\dots": "…", r"\ldots": "…", r"\cdots": "⋯", r"\quad": "  ", r"\qquad": "    ",
-    r"\{": "{", r"\}": "}",
+_FENCE_RE = re.compile(r"```.*?```", re.S)
+_CODE_SPAN_RE = re.compile(r"`[^`\n]+`")
+_BLOCK_MATH_RE = re.compile(r"\$\$(.+?)\$\$", re.S)
+_INLINE_MATH_RE = re.compile(r"(?<![\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$")
+_BLOCK_TOKEN_RE = re.compile(r"(?:<p>\s*)?AXMB(\d+)X(?:\s*</p>)?")
+_INLINE_TOKEN_RE = re.compile(r"AXMI(\d+)X")
+_CODE_TOKEN_RE = re.compile(r"AXCD(\d+)X")
+
+
+def _math_attr(latex: str) -> str:
+    return html.escape(latex.strip(), quote=True)
+
+
+def markdown_to_html(markdown_text: str) -> str:
+    text = normalize_math_delimiters(repair_corrupted_latex(markdown_text or ""))
+    code_parts: List[str] = []
+
+    def stash_code(match: "re.Match[str]") -> str:
+        code_parts.append(match.group(0))
+        return f"AXCD{len(code_parts) - 1}X"
+
+    text = _FENCE_RE.sub(stash_code, text)
+    text = _CODE_SPAN_RE.sub(stash_code, text)
+    blocks: List[str] = []
+    inlines: List[str] = []
+
+    def stash_block(match: "re.Match[str]") -> str:
+        blocks.append(match.group(1))
+        return f"\n\nAXMB{len(blocks) - 1}X\n\n"
+
+    def stash_inline(match: "re.Match[str]") -> str:
+        inlines.append(match.group(1))
+        return f"AXMI{len(inlines) - 1}X"
+
+    text = _BLOCK_MATH_RE.sub(stash_block, text)
+    text = _INLINE_MATH_RE.sub(stash_inline, text)
+    text = text.replace("<", "&lt;")
+    text = _CODE_TOKEN_RE.sub(lambda m: code_parts[int(m.group(1))], text)
+    out = md_lib.markdown(text, extensions=["tables", "fenced_code", "sane_lists"])
+
+    def block_html(match: "re.Match[str]") -> str:
+        latex = blocks[int(match.group(1))]
+        return f'<div class="math-block" data-latex="{_math_attr(latex)}">{html.escape(latex.strip())}</div>'
+
+    def inline_html(match: "re.Match[str]") -> str:
+        latex = inlines[int(match.group(1))]
+        return f'<span class="math-inline" data-latex="{_math_attr(latex)}">{html.escape(latex.strip())}</span>'
+
+    out = _BLOCK_TOKEN_RE.sub(block_html, out)
+    return _INLINE_TOKEN_RE.sub(inline_html, out)
+
+
+def bundled_katex_dir() -> Optional[Path]:
+    """Папка с KaTeX, поставляемая вместе с приложением (assets/katex)."""
+    path = Path(__file__).resolve().parent.parent / "assets" / "katex"
+    return path if (path / "katex.min.js").exists() and (path / "katex.min.css").exists() else None
+
+
+_THEMES = {
+    "dark": {
+        "bg": "#121215", "text": "#e4e4e7", "heading": "#ffffff", "accent": "#818cf8",
+        "border": "#312e81", "panel": "#18181f", "muted": "#a1a1aa", "inline_bg": "#1e1b4b",
+        "inline_fg": "#c7d2fe", "rule": "#27272a",
+    },
+    "light": {
+        "bg": "#ffffff", "text": "#111827", "heading": "#0f172a", "accent": "#4338ca",
+        "border": "#cbd5e1", "panel": "#f8fafc", "muted": "#475569", "inline_bg": "transparent",
+        "inline_fg": "inherit", "rule": "#e2e8f0",
+    },
 }
 
-
-def format_latex_math_offline(expr: str) -> str:
-    """
-    Преобразует LaTeX-формулу в красивую математическую HTML-верстку (дроби, степени, индексы,
-    греческие символы и логические операторы), которая работает 100% офлайн и в QPrinter PDF.
-    """
-    s = repair_corrupted_latex(expr).strip().strip("$").strip()
-    s = html.escape(s)
-
-    # \text{...} и \mathrm{...}
-    s = re.sub(r"\\(?:text|mathrm|mathbf)\{([^{}]*)\}", r'<span style="font-style:normal;">\1</span>', s)
-    s = re.sub(r"\\mathbb\{([^{}]*)\}", r'<b>\1</b>', s)
-
-    # \sqrt{...}
-    s = re.sub(r"\\sqrt\{([^{}]*)\}", r"√(\1)", s)
-
-    # \overline{...} / \bar{...}
-    s = re.sub(r"\\(?:overline|bar)\{([^{}]*)\}", r'<span style="text-decoration:overline;">\1</span>', s)
-
-    # Дроби \frac{a}{b} (включая вложенные 2 уровня)
-    for _ in range(2):
-        s = re.sub(
-            r"\\frac\{([^{}]+)\}\{([^{}]+)\}",
-            r'<span class="math-frac"><span class="num">(\1)</span>⁄<span class="den">(\2)</span></span>',
-            s,
-        )
-
-    # Замена команд LaTeX на математические символы Unicode (сначала длинные команды)
-    for cmd in sorted(LATEX_SYMBOLS.keys(), key=len, reverse=True):
-        s = s.replace(cmd, LATEX_SYMBOLS[cmd])
-
-    # Удаляем служебные \left и \right
-    s = re.sub(r"\\(?:left|right)\b", "", s)
-
-    # Степени ^{...} и ^x
-    s = re.sub(r"\^\{([^{}]+)\}", r"<sup>\1</sup>", s)
-    s = re.sub(r"\^([a-zA-Z0-9+\-∗′])", r"<sup>\1</sup>", s)
-
-    # Нижние индексы _{...} и _x
-    s = re.sub(r"_\{([^{}]+)\}", r"<sub>\1</sub>", s)
-    s = re.sub(r"_([a-zA-Z0-9+\-])", r"<sub>\1</sub>", s)
-
-    return s
-
-
-def ensure_local_katex_assets(storage_path: str) -> Dict[str, str]:
-    """
-    Проверяет наличие локальных файлов KaTeX в `~/AxAI_Storage/katex/`.
-    Если интернет есть при первом вызове — скачивает `katex.min.css` и `katex.min.js` на диск,
-    чтобы все последующие запуски `QWebEngineView` рендерили KaTeX полностью локально без CDN.
-    """
-    katex_dir = os.path.join(storage_path, "katex")
-    os.makedirs(katex_dir, exist_ok=True)
-    css_path = os.path.join(katex_dir, "katex.min.css")
-    js_path = os.path.join(katex_dir, "katex.min.js")
-
-    if not (os.path.exists(css_path) and os.path.exists(js_path)):
-        try:
-            urllib.request.urlretrieve(
-                "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css", css_path
-            )
-            urllib.request.urlretrieve(
-                "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js", js_path
-            )
-        except Exception:
-            pass
-
-    return {
-        "css_path": css_path if os.path.exists(css_path) else "",
-        "js_path": js_path if os.path.exists(js_path) else "",
-    }
-
-
-def _render_inline_markdown_and_math(line: str) -> str:
-    """Рендерит строчные формулы $...$, жирный шрифт, курсив и код внутри строки Markdown."""
-    parts = re.split(r"(\$[^$]+\$)", line)
-    out = []
-    for part in parts:
-        if part.startswith("$") and part.endswith("$") and len(part) > 2:
-            raw_tex = part[1:-1]
-            offline_rendered = format_latex_math_offline(raw_tex)
-            escaped_attr = html.escape(raw_tex, quote=True)
-            out.append(
-                f'<span class="math-inline" data-latex="{escaped_attr}">{offline_rendered}</span>'
-            )
-        else:
-            escaped = html.escape(part)
-            escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
-            escaped = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", escaped)
-            escaped = re.sub(r"`([^`]+)`", r'<code class="inline-code">\1</code>', escaped)
-            out.append(escaped)
-    return "".join(out)
-
-
-def render_lecture_html_with_math(
-    markdown_text: str,
-    title: str = "",
-    subject: str = "",
-    lecturer: str = "",
-    date: str = "",
-    formulas: Optional[List[Dict[str, Any]]] = None,
-    dark_mode: bool = True,
-    storage_path: str = "",
-) -> str:
-    """
-    Генерирует полноценный HTML-документ конспекта с рендерингом Markdown и формул LaTeX.
-    - Внутри `QWebEngineView` автоматически активирует локальный KaTeX (если скачан в `~/AxAI_Storage/katex/`).
-    - Внутри `QTextBrowser` и `QPrinter` (при экспорте PDF) сразу отображает отформатированные
-      математические формулы через `format_latex_math_offline`.
-    """
-    clean_md = repair_corrupted_latex(markdown_text or "")
-    lines = clean_md.split("\n")
-
-    body_parts: List[str] = []
-    in_ul = False
-    in_ol = False
-    in_block_math = False
-    math_buf: List[str] = []
-
-    def close_lists():
-        nonlocal in_ul, in_ol
-        if in_ul:
-            body_parts.append("</ul>")
-            in_ul = False
-        if in_ol:
-            body_parts.append("</ol>")
-            in_ol = False
-
-    for line in lines:
-        trimmed = line.strip()
-
-        # Однострочная блочная формула $$ ... $$
-        if trimmed.startswith("$$") and trimmed.endswith("$$") and len(trimmed) > 4:
-            close_lists()
-            raw_tex = trimmed[2:-2].strip()
-            offline_html = format_latex_math_offline(raw_tex)
-            escaped_attr = html.escape(raw_tex, quote=True)
-            body_parts.append(
-                f'<div class="math-block" data-latex="{escaped_attr}">{offline_html}</div>'
-            )
-            continue
-
-        # Многострочная блочная формула $$
-        if trimmed == "$$":
-            close_lists()
-            if not in_block_math:
-                in_block_math = True
-                math_buf = []
-            else:
-                in_block_math = False
-                raw_tex = "\n".join(math_buf).strip()
-                offline_html = format_latex_math_offline(raw_tex)
-                escaped_attr = html.escape(raw_tex, quote=True)
-                body_parts.append(
-                    f'<div class="math-block" data-latex="{escaped_attr}">{offline_html}</div>'
-                )
-            continue
-
-        if in_block_math:
-            math_buf.append(line)
-            continue
-
-        if trimmed in ("---", "***"):
-            close_lists()
-            body_parts.append("<hr/>")
-            continue
-
-        if trimmed.startswith("### "):
-            close_lists()
-            body_parts.append(f"<h3>{_render_inline_markdown_and_math(trimmed[4:])}</h3>")
-            continue
-        if trimmed.startswith("## "):
-            close_lists()
-            body_parts.append(f"<h2>{_render_inline_markdown_and_math(trimmed[3:])}</h2>")
-            continue
-        if trimmed.startswith("# "):
-            close_lists()
-            body_parts.append(f"<h1>{_render_inline_markdown_and_math(trimmed[2:])}</h1>")
-            continue
-
-        if trimmed.startswith("- ") or trimmed.startswith("* "):
-            if in_ol:
-                body_parts.append("</ol>")
-                in_ol = False
-            if not in_ul:
-                body_parts.append("<ul>")
-                in_ul = True
-            body_parts.append(f"<li>{_render_inline_markdown_and_math(trimmed[2:])}</li>")
-            continue
-
-        m = re.match(r"^(\d+)\.\s+(.*)", trimmed)
-        if m:
-            if in_ul:
-                body_parts.append("</ul>")
-                in_ul = False
-            if not in_ol:
-                body_parts.append("<ol>")
-                in_ol = True
-            body_parts.append(f"<li>{_render_inline_markdown_and_math(m.group(2))}</li>")
-            continue
-
-        if not trimmed:
-            close_lists()
-            continue
-
-        close_lists()
-        body_parts.append(f"<p>{_render_inline_markdown_and_math(line)}</p>")
-
-    close_lists()
-
-    # Если у лекции есть карточки формул — добавляем сводный блок в конец
-    if formulas:
-        body_parts.append('<h2>Сводка ключевых формул лекции</h2>')
-        for f in formulas:
-            f_title = html.escape(str(f.get("title", "Формула")))
-            f_latex = str(f.get("latex", ""))
-            f_ctx = html.escape(str(f.get("context", "")))
-            body_parts.append(
-                f'<div class="formula-card">'
-                f'<div class="formula-title">{f_title}</div>'
-                f'<div class="math-block" data-latex="{html.escape(f_latex, quote=True)}">{format_latex_math_offline(f_latex)}</div>'
-                f'<div class="formula-ctx">{f_ctx}</div>'
-                f'</div>'
-            )
-
-    bg_color = "#121215" if dark_mode else "#ffffff"
-    text_color = "#e4e4e7" if dark_mode else "#111827"
-    heading_color = "#ffffff" if dark_mode else "#09090b"
-    accent_color = "#818cf8" if dark_mode else "#4338ca"
-    math_bg = "#18181f" if dark_mode else "#f4f4f8"
-    math_border = "#312e81" if dark_mode else "#c7d2fe"
-    inline_math_bg = "#1e1b4b" if dark_mode else "#eef2ff"
-    inline_math_fg = "#c7d2fe" if dark_mode else "#312e81"
-    muted_color = "#a1a1aa" if dark_mode else "#4b5563"
-
-    # Подключение локального KaTeX, если он сохранен в storage_path/katex
-    katex_head = ""
-    katex_script = ""
-    if storage_path:
-        katex_js = os.path.join(storage_path, "katex", "katex.min.js")
-        katex_css = os.path.join(storage_path, "katex", "katex.min.css")
-        if os.path.exists(katex_js) and os.path.exists(katex_css):
-            css_url = "file:///" + os.path.abspath(katex_css).replace("\\", "/")
-            js_url = "file:///" + os.path.abspath(katex_js).replace("\\", "/")
-            katex_head = f'<link rel="stylesheet" href="{css_url}">\n<script src="{js_url}"></script>'
-            katex_script = """
-            <script>
-            document.addEventListener("DOMContentLoaded", function() {
-              if (typeof katex !== "undefined") {
-                document.querySelectorAll(".math-block").forEach(function(el) {
-                  var tex = el.getAttribute("data-latex");
-                  if (tex) {
-                    try { katex.render(tex, el, { displayMode: true, throwOnError: false }); } catch (e) {}
-                  }
-                });
-                document.querySelectorAll(".math-inline").forEach(function(el) {
-                  var tex = el.getAttribute("data-latex");
-                  if (tex) {
-                    try { katex.render(tex, el, { displayMode: false, throwOnError: false }); } catch (e) {}
-                  }
-                });
-              }
-            });
-            </script>
-            """
-
-    header_block = ""
-    if not dark_mode and title:
-        header_block = (
-            f'<div style="border-bottom: 2px solid #e5e7eb; padding-bottom: 12px; margin-bottom: 18px;">'
-            f'<h1 style="margin:0 0 6px 0; font-size: 22pt;">{html.escape(title)}</h1>'
-            f'<div style="color:{muted_color}; font-size:10pt;">'
-            f'<b>Предмет:</b> {html.escape(subject)} &nbsp;·&nbsp; '
-            f'<b>Преподаватель:</b> {html.escape(lecturer)} &nbsp;·&nbsp; '
-            f'<b>Дата:</b> {html.escape(date)}'
-            f'</div></div>'
-        )
-
-    return f"""<!DOCTYPE html>
-<html>
+_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
+<html lang="ru">
 <head>
 <meta charset="utf-8">
-{katex_head}
+$katex_css
 <style>
-  body {{
-    background-color: {bg_color};
-    color: {text_color};
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
-    font-size: 13.5px;
-    line-height: 1.68;
-    padding: 20px 26px;
-    margin: 0;
-  }}
-  h1 {{ color: {heading_color}; font-size: 20px; font-weight: 700; margin-top: 18px; margin-bottom: 10px; }}
-  h2 {{ color: {accent_color}; font-size: 16.5px; font-weight: 700; margin-top: 22px; margin-bottom: 8px; border-bottom: 1px solid {math_border}; padding-bottom: 4px; }}
-  h3 {{ color: {heading_color}; font-size: 14.5px; font-weight: 600; margin-top: 16px; margin-bottom: 6px; }}
-  p {{ margin-top: 6px; margin-bottom: 10px; }}
-  ul, ol {{ margin-top: 6px; margin-bottom: 12px; padding-left: 24px; }}
-  li {{ margin-bottom: 5px; }}
-  strong {{ color: {heading_color}; font-weight: 600; }}
-  hr {{ border: none; border-top: 1px solid #27272a; margin: 18px 0; }}
-  .inline-code {{
-    font-family: "JetBrains Mono", Consolas, monospace;
-    background-color: {math_bg};
-    padding: 2px 5px;
-    border-radius: 4px;
-    font-size: 12.5px;
-  }}
-  .math-inline {{
-    font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
-    background-color: {inline_math_bg};
-    color: {inline_math_fg};
-    padding: 1px 6px;
-    border-radius: 5px;
-    font-size: 14.5px;
-    font-style: italic;
-  }}
-  .math-block {{
-    font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
-    background-color: {math_bg};
-    border-left: 3px solid {accent_color};
-    color: {heading_color};
-    padding: 12px 16px;
-    margin: 12px 0;
-    border-radius: 8px;
-    font-size: 16px;
-    text-align: center;
-  }}
-  .formula-card {{
-    background-color: {math_bg};
-    border: 1px solid {math_border};
-    border-radius: 10px;
-    padding: 12px 16px;
-    margin: 10px 0;
-  }}
-  .formula-title {{ font-weight: 600; color: {accent_color}; font-size: 13px; margin-bottom: 4px; }}
-  .formula-ctx {{ color: {muted_color}; font-size: 12px; margin-top: 4px; }}
+  :root {
+    --bg: $bg; --text: $text; --heading: $heading; --accent: $accent; --border: $border;
+    --panel: $panel; --muted: $muted; --rule: $rule;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    margin: 0; padding: $padding; color: var(--text);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    font-size: $font_size; line-height: 1.6;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  h1 { color: var(--heading); font-size: 1.55em; margin: 0 0 0.4em; line-height: 1.25; }
+  h2 { color: var(--accent); font-size: 1.2em; margin: 1.5em 0 0.5em; padding-bottom: 0.2em; border-bottom: 1px solid var(--border); break-after: avoid; }
+  h3 { color: var(--heading); font-size: 1.05em; margin: 1.2em 0 0.4em; break-after: avoid; }
+  p { margin: 0.5em 0 0.7em; orphans: 3; widows: 3; }
+  ul, ol { margin: 0.4em 0 0.8em; padding-left: 1.6em; }
+  li { margin-bottom: 0.25em; }
+  strong { color: var(--heading); }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 1.2em 0; }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.9em; background: var(--panel); padding: 0.1em 0.35em; border-radius: 4px; }
+  pre { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; break-inside: avoid; }
+  pre code { background: none; padding: 0; }
+  blockquote { margin: 0.8em 0; padding: 0.1em 1em; border-left: 3px solid var(--border); color: var(--muted); }
+  table { border-collapse: collapse; margin: 0.8em 0; break-inside: avoid; }
+  th, td { border: 1px solid var(--border); padding: 0.35em 0.7em; text-align: left; }
+  th { background: var(--panel); color: var(--heading); }
+  .doc-header { border-bottom: 2px solid var(--accent); padding-bottom: 0.7em; margin-bottom: 1.2em; }
+  .doc-meta { color: var(--muted); font-size: 0.85em; }
+  .math-inline { background: $inline_bg; color: $inline_fg; border-radius: 4px; padding: 0 0.15em; }
+  .math-block { background: var(--panel); border-left: 3px solid var(--accent); border-radius: 6px; padding: 0.5em 1em; margin: 0.8em 0; text-align: center; overflow-x: auto; break-inside: avoid; }
+  .katex-display { margin: 0.3em 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.6em 1em; margin: 0.7em 0; break-inside: avoid; }
+  .card-title { color: var(--accent); font-weight: 600; font-size: 0.95em; }
+  .card-note { color: var(--muted); font-size: 0.85em; }
+  .card .math-block { background: transparent; border: none; padding: 0.2em 0; margin: 0.2em 0; }
+  .task { display: flex; gap: 0.6em; margin: 0.35em 0; break-inside: avoid; }
+  .cb { flex: none; width: 0.9em; height: 0.9em; margin-top: 0.3em; border: 1.5px solid var(--muted); border-radius: 3px; }
+  .cb.done { background: var(--accent); border-color: var(--accent); }
+  .task.done .task-text { color: var(--muted); text-decoration: line-through; }
+  .task-due { color: var(--muted); font-size: 0.85em; }
+  .mark { margin: 0.25em 0; break-inside: avoid; }
+  .mark-time { font-family: "JetBrains Mono", Consolas, monospace; color: var(--accent); margin-right: 0.6em; }
 </style>
 </head>
 <body>
-{header_block}
-{"".join(body_parts)}
-{katex_script}
+$header
+<main>$body</main>
+$katex_script
 </body>
-</html>"""
+</html>
+""")
+
+_RENDER_SCRIPT = """<script src="$js_url"></script>
+<script>
+document.addEventListener("DOMContentLoaded", async function () {
+  window.__axError = "";
+  try {
+    document.querySelectorAll("[data-latex]").forEach(function (el) {
+      var display = el.classList.contains("math-block");
+      try {
+        katex.render(el.getAttribute("data-latex"), el, {
+          displayMode: display, throwOnError: false, strict: "ignore", trust: false
+        });
+      } catch (e) {
+        window.__axError += String(e) + "; ";
+      }
+    });
+    void document.body.offsetHeight;
+    if (document.fonts && document.fonts.ready) { await document.fonts.ready; }
+  } catch (e) {
+    window.__axError += String(e);
+  }
+  window.__axDone = true;
+});
+</script>"""
+
+
+def _format_mmss(seconds: int) -> str:
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def _formulas_html(formulas: List[Dict[str, Any]]) -> str:
+    if not formulas:
+        return ""
+    parts = ["<h2>Ключевые формулы</h2>"]
+    for f in formulas:
+        latex = repair_corrupted_latex(str(f.get("latex", ""))).strip().strip("$").strip()
+        if not latex:
+            continue
+        note = html.escape(str(f.get("context", "")))
+        parts.append(
+            '<div class="card">'
+            f'<div class="card-title">{html.escape(str(f.get("title", "Формула")))}</div>'
+            f'<div class="math-block" data-latex="{_math_attr(latex)}">{html.escape(latex)}</div>'
+            + (f'<div class="card-note">{note}</div>' if note else "")
+            + "</div>"
+        )
+    return "\n".join(parts)
+
+
+def _tasks_html(tasks: List[Dict[str, Any]]) -> str:
+    if not tasks:
+        return ""
+    parts = ["<h2>Задачи и дедлайны</h2>"]
+    for t in tasks:
+        done = bool(t.get("completed"))
+        parts.append(
+            f'<div class="task{" done" if done else ""}"><span class="cb{" done" if done else ""}"></span>'
+            f'<div><span class="task-text">{html.escape(str(t.get("task", "")))}</span> '
+            f'<span class="task-due">— срок: {html.escape(str(t.get("deadline", "")))}</span></div></div>'
+        )
+    return "\n".join(parts)
+
+
+def _bookmarks_html(bookmarks: List[Dict[str, Any]]) -> str:
+    if not bookmarks:
+        return ""
+    parts = ["<h2>Важные моменты записи</h2>"]
+    for b in bookmarks:
+        note = html.escape(str(b.get("note", ""))) or "Метка"
+        parts.append(
+            f'<div class="mark"><span class="mark-time">{_format_mmss(int(b.get("time_sec", 0)))}</span>{note}</div>'
+        )
+    return "\n".join(parts)
+
+
+def render_lecture_html(
+    lecture: Dict[str, Any],
+    katex_dir: Optional[Path] = None,
+    dark_mode: bool = True,
+    with_header: bool = False,
+) -> str:
+    """Собирает страницу конспекта. Для PDF: dark_mode=False, with_header=True."""
+    theme = _THEMES["dark" if dark_mode else "light"]
+    header = ""
+    if with_header:
+        meta = " · ".join(
+            html.escape(str(p))
+            for p in (lecture.get("subject"), lecture.get("lecturer"), lecture.get("date"))
+            if p
+        )
+        header = (
+            f'<header class="doc-header"><h1>{html.escape(str(lecture.get("title", "Лекция")))}</h1>'
+            f'<div class="doc-meta">{meta}</div></header>'
+        )
+
+    body = markdown_to_html(lecture.get("text", ""))
+    body += _formulas_html(lecture.get("formulas") or [])
+    body += _tasks_html(lecture.get("tasks") or []) if with_header else ""
+    body += _bookmarks_html(lecture.get("bookmarks") or []) if with_header else ""
+
+    katex_css = katex_script = ""
+    if katex_dir is not None:
+        base = Path(katex_dir).resolve()
+        katex_css = f'<link rel="stylesheet" href="{(base / "katex.min.css").as_uri()}">'
+        katex_script = Template(_RENDER_SCRIPT).substitute(js_url=(base / "katex.min.js").as_uri())
+
+    return _PAGE_TEMPLATE.safe_substitute(
+        **theme,
+        padding="20px 26px" if dark_mode else "0",
+        font_size="14px" if dark_mode else "11pt",
+        katex_css=katex_css,
+        katex_script=katex_script,
+        header=header,
+        body=body,
+    )
 
 
 def markdown_to_latex_body(raw_markdown: str) -> str:
-    """Конвертирует Markdown-конспект с формулами в компилируемый LaTeX (.tex)."""
-    clean_md = repair_corrupted_latex(raw_markdown)
+    clean_md = normalize_math_delimiters(repair_corrupted_latex(raw_markdown))
     lines = clean_md.split("\n")
-    out = []
-    in_ul = False
-    in_ol = False
+    out: List[str] = []
+    state = {"ul": False, "ol": False}
     in_block_math = False
-    math_buf = []
+    math_buf: List[str] = []
 
-    def close_lists():
-        nonlocal in_ul, in_ol
-        if in_ul:
+    def close_lists() -> None:
+        if state["ul"]:
             out.append("\\end{itemize}")
-            in_ul = False
-        if in_ol:
+            state["ul"] = False
+        if state["ol"]:
             out.append("\\end{enumerate}")
-            in_ol = False
+            state["ol"] = False
 
     def format_inline(text: str) -> str:
         parts = re.split(r"(\$[^$]+\$)", text)
@@ -514,68 +371,47 @@ def markdown_to_latex_body(raw_markdown: str) -> str:
         trimmed = line.strip()
         if trimmed.startswith("$$") and trimmed.endswith("$$") and len(trimmed) > 4:
             close_lists()
-            out.append("\\begin{equation*}")
-            out.append(trimmed[2:-2].strip())
-            out.append("\\end{equation*}")
+            out += ["\\begin{equation*}", trimmed[2:-2].strip(), "\\end{equation*}"]
             continue
-
         if trimmed == "$$":
             close_lists()
             if not in_block_math:
-                in_block_math = True
-                math_buf = []
+                in_block_math, math_buf = True, []
             else:
                 in_block_math = False
-                out.append("\\begin{equation*}")
-                out.extend(math_buf)
-                out.append("\\end{equation*}")
+                out += ["\\begin{equation*}", *math_buf, "\\end{equation*}"]
             continue
-
         if in_block_math:
             math_buf.append(line)
             continue
 
-        if trimmed.startswith("### "):
+        for prefix, command in (("### ", "subsubsection*"), ("## ", "subsection*"), ("# ", "section*")):
+            if trimmed.startswith(prefix):
+                close_lists()
+                out.append(f"\\{command}{{{format_inline(trimmed[len(prefix):])}}}")
+                break
+        else:
+            if trimmed.startswith("- ") or trimmed.startswith("* "):
+                if state["ol"]:
+                    out.append("\\end{enumerate}")
+                    state["ol"] = False
+                if not state["ul"]:
+                    out.append("\\begin{itemize}")
+                    state["ul"] = True
+                out.append(f"  \\item {format_inline(trimmed[2:])}")
+                continue
+            m = re.match(r"^(\d+)\.\s+(.*)", trimmed)
+            if m:
+                if state["ul"]:
+                    out.append("\\end{itemize}")
+                    state["ul"] = False
+                if not state["ol"]:
+                    out.append("\\begin{enumerate}")
+                    state["ol"] = True
+                out.append(f"  \\item {format_inline(m.group(2))}")
+                continue
             close_lists()
-            out.append(f"\\subsubsection*{{{format_inline(trimmed[4:])}}}")
-            continue
-        if trimmed.startswith("## "):
-            close_lists()
-            out.append(f"\\subsection*{{{format_inline(trimmed[3:])}}}")
-            continue
-        if trimmed.startswith("# "):
-            close_lists()
-            out.append(f"\\section*{{{format_inline(trimmed[2:])}}}")
-            continue
-
-        if trimmed.startswith("- ") or trimmed.startswith("* "):
-            if in_ol:
-                out.append("\\end{enumerate}")
-                in_ol = False
-            if not in_ul:
-                out.append("\\begin{itemize}")
-                in_ul = True
-            out.append(f"  \\item {format_inline(trimmed[2:])}")
-            continue
-
-        m = re.match(r"^(\d+)\.\s+(.*)", trimmed)
-        if m:
-            if in_ul:
-                out.append("\\end{itemize}")
-                in_ul = False
-            if not in_ol:
-                out.append("\\begin{enumerate}")
-                in_ol = True
-            out.append(f"  \\item {format_inline(m.group(2))}")
-            continue
-
-        if not trimmed:
-            close_lists()
-            out.append("")
-            continue
-
-        close_lists()
-        out.append(format_inline(line))
+            out.append("" if not trimmed else format_inline(line))
 
     close_lists()
     return "\n".join(out)
@@ -586,8 +422,7 @@ def export_lecture_to_markdown(lec: Dict[str, Any], save_path: str) -> None:
     md = f"# {lec.get('title', '')}\n\n"
     md += f"- **Предмет:** {lec.get('subject', '')}\n"
     md += f"- **Преподаватель:** {lec.get('lecturer', '')}\n"
-    md += f"- **Дата:** {lec.get('date', '')}\n\n---\n\n"
-    md += f"{body}\n\n"
+    md += f"- **Дата:** {lec.get('date', '')}\n\n---\n\n{body}\n\n"
 
     tasks = lec.get("tasks", [])
     if tasks:
@@ -613,8 +448,7 @@ def export_lecture_to_latex(lec: Dict[str, Any], save_path: str) -> None:
         f"\\title{{{lec.get('title', '')}}}\n"
         f"\\author{{{lec.get('lecturer', '')} \\\\ \\small {lec.get('subject', '')}}}\n"
         f"\\date{{{lec.get('date', '')}}}\n\n"
-        "\\begin{document}\n"
-        "\\maketitle\n\n"
+        "\\begin{document}\n\\maketitle\n\n"
         f"{body_tex}\n\n"
     )
     tasks = lec.get("tasks", [])
