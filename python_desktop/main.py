@@ -19,11 +19,11 @@ from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QProgressDialog, QPushButton, QScrollArea, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from audio_recorder import MicrophoneRecorder
-from audio_worker import ExpandLectureWorker, TranscriptionWorker
+from audio_worker import ExpandLectureWorker, ImportDocumentWorker, TranscriptionWorker
 from backup import BackupError, create_backup, read_manifest, restore_backup
 from db.bookmarks import BookmarkRepository
 from db.repositories import (
@@ -35,43 +35,13 @@ from export.exporters import (
     repair_corrupted_latex, unpack_raw_json_lecture_if_needed,
 )
 from ml.engine import HardwareInspector
-from pdf_importer import parse_pdf_document
+from ui.theme import THEME_CHOICES, apply_theme
 from ui.latex_preview import (
     LatexLecturePreview, crop_and_compress_avatar_square, draw_fixed_app_icon_pixmap,
     pixmap_from_png_bytes,
 )
 
 
-DARK_STYLE = """
-QMainWindow, QDialog { background-color: #0a0a0a; }
-QWidget { color: #e5e5e5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-QFrame#headerBar { background-color: #171717; border-bottom: 1px solid #262626; }
-QFrame#sidebar { background-color: #171717; border-right: 1px solid #262626; }
-QFrame#card { background-color: #171717; border: 1px solid #262626; border-radius: 12px; }
-QFrame#progressCard { background-color: #14141d; border: 1px solid #4338ca; border-radius: 12px; }
-QPushButton { background-color: #1f1f23; border: 1px solid #2e2e34; border-radius: 8px; padding: 7px 13px; font-size: 12px; font-weight: 500; color: #e5e5e5; }
-QPushButton:hover { background-color: #2a2a30; border-color: #3f3f46; }
-QPushButton:disabled { color: #71717a; }
-QPushButton#primaryBtn { background-color: #4f46e5; border: none; color: #ffffff; font-weight: 600; }
-QPushButton#primaryBtn:hover { background-color: #4338ca; }
-QPushButton#expandAiBtn { background-color: #1e1b4b; border: 1px solid #4338ca; color: #a5b4fc; font-weight: 600; }
-QPushButton#expandAiBtn:hover { background-color: #312e81; }
-QPushButton#revertBtn { background-color: #2e1f0f; border: 1px solid #b45309; color: #fcd34d; font-weight: 600; }
-QPushButton#revertBtn:hover { background-color: #452c14; }
-QPushButton#recordBtn { background-color: #e11d48; border: none; color: #ffffff; font-weight: 600; padding: 12px 24px; font-size: 13px; border-radius: 10px; }
-QPushButton#recordBtn:hover { background-color: #be123c; }
-QLineEdit, QComboBox, QTextEdit { background-color: #121214; border: 1px solid #27272a; border-radius: 8px; padding: 8px 12px; font-size: 13px; color: #f4f4f5; }
-QLineEdit:focus, QTextEdit:focus { border: 1px solid #6366f1; }
-QListWidget { background-color: #141417; border: 1px solid #262626; border-radius: 10px; padding: 6px; }
-QListWidget::item { padding: 12px; border-radius: 8px; margin: 3px 0px; }
-QListWidget::item:hover { background-color: #1f1f24; }
-QListWidget::item:selected { background-color: #27272a; border-left: 3px solid #6366f1; }
-QProgressBar { border: 1px solid #27272a; border-radius: 6px; text-align: center; height: 16px; background-color: #18191d; color: #ffffff; font-size: 11px; font-weight: 600; }
-QProgressBar::chunk { background-color: #4f46e5; border-radius: 5px; }
-"""
-
-NAV_ACTIVE = "text-align: left; padding: 10px 12px; background-color: #4f46e5; color: white; font-weight: 600;"
-NAV_IDLE = "text-align: left; padding: 10px 12px; background-color: #18191d; color: #e4e4e7;"
 
 
 def format_mmss(seconds: int) -> str:
@@ -83,7 +53,6 @@ class AxAIDesktopApp(QMainWindow):
         super().__init__()
         self.setWindowTitle("AxAI")
         self.resize(1260, 820)
-        self.setStyleSheet(DARK_STYLE)
 
         self.storage_path = os.path.expanduser("~/AxAI_Storage")
         self.audio_dir = os.path.join(self.storage_path, "audio")
@@ -102,10 +71,12 @@ class AxAIDesktopApp(QMainWindow):
         self.lectures = self.lecture_repo.get_all_lectures()
         self.student_profile = self.profile_repo.get_profile()
         self.app_settings = self.settings_repo.get_settings()
+        self.is_dark = apply_theme(QApplication.instance(), self.app_settings.get("theme", "dark"))
         self.current_lecture = None
         self.pending_bookmarks = []
         self.worker = None
         self.expand_worker = None
+        self.import_worker = None
         self.hardware_checked = False
 
         self.setWindowIcon(QIcon(draw_fixed_app_icon_pixmap(64)))
@@ -135,13 +106,13 @@ class AxAIDesktopApp(QMainWindow):
             except Exception:
                 pass
 
-    # аватарка 
+   
     def get_user_avatar_pixmap(self, size: int = 36):
         return pixmap_from_png_bytes(self.profile_repo.get_avatar_bytes(), size=size)
 
     def choose_user_avatar(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Фото", "",
+            self, "Фото для аватара", "",
             "Изображения (*.jpg *.jpeg *.png *.webp *.bmp)",
         )
         if path:
@@ -158,7 +129,7 @@ class AxAIDesktopApp(QMainWindow):
         self.header_avatar_btn.setIcon(QIcon(self.get_user_avatar_pixmap(24)))
         self.profile_avatar_lbl.setPixmap(self.get_user_avatar_pixmap(64))
 
-    # интерфей 
+    
     def init_ui(self):
         root_widget = QWidget()
         root_vbox = QVBoxLayout(root_widget)
@@ -179,7 +150,7 @@ class AxAIDesktopApp(QMainWindow):
 
         brand_label = QLabel("AxAI")
         brand_label.setFont(QFont("Arial", 14, QFont.Bold))
-        brand_label.setStyleSheet("color: #ffffff;")
+        brand_label.setObjectName("brand")
         header_layout.addWidget(brand_label)
         header_layout.addStretch()
 
@@ -211,7 +182,8 @@ class AxAIDesktopApp(QMainWindow):
             ("profile", "Профиль"),
         ]:
             btn = QPushButton(label)
-            btn.setStyleSheet(NAV_IDLE)
+            btn.setObjectName("navBtn")
+            btn.setProperty("active", False)
             btn.clicked.connect(lambda checked=False, k=key: self.navigate_to(k))
             sidebar_layout.addWidget(btn)
             self.nav_buttons[key] = btn
@@ -259,9 +231,11 @@ class AxAIDesktopApp(QMainWindow):
             self.refresh_hardware_info()
         self.pages.setCurrentIndex(mapping.get(page_name, 0))
         for key, btn in self.nav_buttons.items():
-            btn.setStyleSheet(NAV_ACTIVE if key == page_name else NAV_IDLE)
+            btn.setProperty("active", key == page_name)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
-    # запись
+    
     def create_record_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -284,7 +258,7 @@ class AxAIDesktopApp(QMainWindow):
         layout.addLayout(meta_row)
 
         ctx_lbl = QLabel("Контекст:")
-        ctx_lbl.setStyleSheet("color: #a1a1aa; font-size: 12px;")
+        ctx_lbl.setObjectName("muted")
         layout.addWidget(ctx_lbl)
 
         self.input_record_context = QTextEdit()
@@ -297,11 +271,11 @@ class AxAIDesktopApp(QMainWindow):
         self.timer_label = QLabel("00:00")
         self.timer_label.setFont(QFont("Arial", 36, QFont.Bold))
         self.timer_label.setAlignment(Qt.AlignCenter)
-        self.timer_label.setStyleSheet("color: #6366f1; padding: 14px;")
+        self.timer_label.setObjectName("timerLabel")
         layout.addWidget(self.timer_label)
 
         btn_box = QHBoxLayout()
-        self.btn_record = QPushButton("Начать запись с микрофона")
+        self.btn_record = QPushButton("Начать запись")
         self.btn_record.setObjectName("recordBtn")
         self.btn_record.clicked.connect(self.toggle_recording)
 
@@ -325,7 +299,7 @@ class AxAIDesktopApp(QMainWindow):
 
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("color: #a5b4fc; font-size: 12px; font-weight: 500;")
+        self.status_label.setObjectName("accentText")
         layout.addWidget(self.status_label)
 
         cancel_row = QHBoxLayout()
@@ -351,14 +325,14 @@ class AxAIDesktopApp(QMainWindow):
             self.is_recording = True
             self.record_seconds = 0
             self.timer_label.setText("00:00")
-            self.btn_record.setText("Завершить")
+            self.btn_record.setText("Завершить и сформировать конспект")
             self.btn_bookmark.setEnabled(True)
             self.btn_upload_audio.setEnabled(False)
             self.record_timer.start(1000)
         else:
             self.is_recording = False
             self.record_timer.stop()
-            self.btn_record.setText("Начать запись с микрофона")
+            self.btn_record.setText("Начать запись")
             self.btn_bookmark.setEnabled(False)
             self.btn_upload_audio.setEnabled(True)
             saved_file = self.recorder.stop()
@@ -396,7 +370,7 @@ class AxAIDesktopApp(QMainWindow):
         self.btn_cancel_ai.setVisible(True)
         self.btn_record.setEnabled(False)
         self.btn_upload_audio.setEnabled(False)
-        self.status_label.setText("Подготовка распознавания речи...")
+        self.status_label.setText("Подготовка...")
 
         self.worker = TranscriptionWorker(
             audio_path=audio_path,
@@ -470,7 +444,7 @@ class AxAIDesktopApp(QMainWindow):
         self.status_label.setText("Обработка не выполнена")
         QMessageBox.warning(self, "Ошибка", err_msg)
 
-    # моои проекты
+    
     def create_history_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -527,7 +501,7 @@ class AxAIDesktopApp(QMainWindow):
         if lec:
             self.open_lecture_viewer(lec)
 
-    # просмотр конспекта
+    
     def create_viewer_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -563,7 +537,7 @@ class AxAIDesktopApp(QMainWindow):
         self.btn_export_pdf.clicked.connect(self.export_current_pdf)
         top_bar.addWidget(self.btn_export_pdf)
 
-        export_md_btn = QPushButton("MD")
+        export_md_btn = QPushButton("Markdown")
         export_md_btn.clicked.connect(self.export_current_markdown)
         top_bar.addWidget(export_md_btn)
 
@@ -572,17 +546,17 @@ class AxAIDesktopApp(QMainWindow):
         top_bar.addWidget(export_tex_btn)
 
         delete_lec_btn = QPushButton("🗑️")
-        delete_lec_btn.setToolTip("Удалить")
+        delete_lec_btn.setToolTip("Удалить эту лекцию")
         delete_lec_btn.clicked.connect(self.delete_current_lecture)
         top_bar.addWidget(delete_lec_btn)
         layout.addLayout(top_bar)
 
-        self.viewer_title = QLabel("Название")
+        self.viewer_title = QLabel("Название лекции")
         self.viewer_title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(self.viewer_title)
 
         self.viewer_meta = QLabel("")
-        self.viewer_meta.setStyleSheet("color: #a1a1aa; font-size: 12px;")
+        self.viewer_meta.setObjectName("muted")
         layout.addWidget(self.viewer_meta)
 
         self.expand_progress_card = QFrame()
@@ -594,11 +568,11 @@ class AxAIDesktopApp(QMainWindow):
 
         p_top = QHBoxLayout()
         self.expand_stage_lbl = QLabel("")
-        self.expand_stage_lbl.setStyleSheet("color: #c7d2fe; font-weight: 600; font-size: 12px;")
+        self.expand_stage_lbl.setObjectName("stageText")
         p_top.addWidget(self.expand_stage_lbl)
         p_top.addStretch()
         self.expand_time_lbl = QLabel("Прошло: 0 сек")
-        self.expand_time_lbl.setStyleSheet("color: #a1a1aa; font-size: 11px;")
+        self.expand_time_lbl.setObjectName("hint")
         p_top.addWidget(self.expand_time_lbl)
         self.expand_cancel_btn = QPushButton("Отмена")
         self.expand_cancel_btn.clicked.connect(self.cancel_expand)
@@ -639,7 +613,7 @@ class AxAIDesktopApp(QMainWindow):
         self.btn_sub_transcript = QPushButton("Стенограмма")
         self.btn_sub_transcript.clicked.connect(lambda: self.switch_viewer_mode("transcript"))
 
-        self.save_edits_btn = QPushButton("Сохранить")
+        self.save_edits_btn = QPushButton("Сохранить правки")
         self.save_edits_btn.setObjectName("primaryBtn")
         self.save_edits_btn.clicked.connect(self.save_current_lecture_text)
         self.save_edits_btn.setVisible(False)
@@ -653,6 +627,7 @@ class AxAIDesktopApp(QMainWindow):
 
         self.viewer_stack = QStackedWidget()
         self.latex_preview = LatexLecturePreview(parent=self)
+        self.latex_preview.set_dark_mode(self.is_dark)
         self.latex_preview.pdf_exporter.finished.connect(self.on_pdf_exported)
         self.text_editor = QTextEdit()
         self.transcript_viewer = QTextEdit()
@@ -738,7 +713,7 @@ class AxAIDesktopApp(QMainWindow):
             return
         revs = self.revision_repo.get_revisions(self.current_lecture["id"])
         self.current_lecture["revisions"] = revs
-        self.history_revs_btn.setText(f"🕒 История версий ({len(revs)})")
+        self.history_revs_btn.setText(f"История версий ({len(revs)})")
         prev_rev = self._get_previous_revision()
         self.revert_prev_btn.setVisible(prev_rev is not None)
         if prev_rev:
@@ -760,7 +735,7 @@ class AxAIDesktopApp(QMainWindow):
             existing = self.revision_repo.get_revisions(lec_id)
             self.revision_repo.add_revision_if_new(
                 lec_id, current_text,
-                "Исходная версия" if not existing else f"Сохранённая версия #{len(existing) + 1}",
+                "Исходная (лаконичная) версия" if not existing else f"Сохранённая версия #{len(existing) + 1}",
             )
 
         self.current_lecture["text"] = rev["summaryMarkdown"]
@@ -786,7 +761,7 @@ class AxAIDesktopApp(QMainWindow):
             "сохраняется в базе. Выберите редакцию для восстановления:"
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color: #a1a1aa; font-size: 12px;")
+        info.setObjectName("muted")
         vbox.addWidget(info)
 
         list_w = QListWidget()
@@ -795,7 +770,7 @@ class AxAIDesktopApp(QMainWindow):
             badge = "  [ТЕКУЩАЯ ВЕРСИЯ]" if rev["summaryMarkdown"].strip() == current_trimmed else ""
             preview = rev["summaryMarkdown"].replace("\n", " ")[:110]
             item = QListWidgetItem(
-                f"{rev['label']}{badge}  ·  {rev['wordCount']} слов  ·  {rev['timestamp']}\n   {preview}..."
+                f"📌 {rev['label']}{badge}  ·  {rev['wordCount']} слов  ·  {rev['timestamp']}\n   {preview}..."
             )
             item.setData(Qt.UserRole, rev)
             list_w.addItem(item)
@@ -804,7 +779,7 @@ class AxAIDesktopApp(QMainWindow):
         btn_row = QHBoxLayout()
         close_b = QPushButton("Закрыть")
         close_b.clicked.connect(dlg.reject)
-        restore_b = QPushButton("⏪ Восстановить выбранную версию")
+        restore_b = QPushButton("Восстановить выбранную версию")
         restore_b.setObjectName("primaryBtn")
 
         def on_restore():
@@ -842,7 +817,7 @@ class AxAIDesktopApp(QMainWindow):
         self._set_viewer_meta(self.current_lecture, new_text)
         self.switch_viewer_mode("rendered")
 
-    # Конспект
+    
     def handle_expand_lecture_ai(self):
         if not self.current_lecture or (self.expand_worker is not None and self.expand_worker.isRunning()):
             return
@@ -885,7 +860,7 @@ class AxAIDesktopApp(QMainWindow):
         self.expand_timer.stop()
         self.expand_progress_card.setVisible(False)
         self.expand_ai_btn.setEnabled(True)
-        self.expand_ai_btn.setText("✨ Сделать подробнее (ИИ)")
+        self.expand_ai_btn.setText("Сделать подробнее")
 
     def on_expand_worker_progress(self, pct: int, stage_msg: str):
         self.expand_progress_bar.setValue(max(self.expand_progress_bar.value(), pct))
@@ -976,13 +951,13 @@ class AxAIDesktopApp(QMainWindow):
 
     def on_pdf_exported(self, ok: bool, message: str):
         self.btn_export_pdf.setEnabled(True)
-        self.btn_export_pdf.setText("🖨️ Скачать PDF")
+        self.btn_export_pdf.setText("Скачать PDF")
         if ok:
             QMessageBox.information(self, "Экспорт PDF", f"PDF сохранён:\n{message}")
         else:
             QMessageBox.warning(self, "Экспорт PDF", message)
 
-    # дедлайны
+    
     def create_deadlines_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -995,7 +970,7 @@ class AxAIDesktopApp(QMainWindow):
         title.setFont(QFont("Arial", 16, QFont.Bold))
         title_box.addWidget(title)
         subtitle = QLabel("Домашние задания, даты сдачи работ")
-        subtitle.setStyleSheet("color: #a1a1aa; font-size: 12px;")
+        subtitle.setObjectName("muted")
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch()
@@ -1016,7 +991,7 @@ class AxAIDesktopApp(QMainWindow):
         self.deadline_subject.addItem("Все предметы", "")
         self.deadline_subject.currentIndexChanged.connect(self.refresh_deadlines_list)
         self.deadline_counter = QLabel("")
-        self.deadline_counter.setStyleSheet("color: #a1a1aa; font-size: 12px;")
+        self.deadline_counter.setObjectName("muted")
         filters.addWidget(self.deadline_status)
         filters.addWidget(self.deadline_subject)
         filters.addStretch()
@@ -1025,7 +1000,6 @@ class AxAIDesktopApp(QMainWindow):
 
         self.tasks_scroll = QScrollArea()
         self.tasks_scroll.setWidgetResizable(True)
-        self.tasks_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.tasks_container = QWidget()
         self.tasks_vbox = QVBoxLayout(self.tasks_container)
         self.tasks_vbox.setSpacing(10)
@@ -1076,7 +1050,7 @@ class AxAIDesktopApp(QMainWindow):
 
         if not items:
             empty = QLabel("Нет задач по выбранным фильтрам. Запишите лекцию, импортируйте PDF или добавьте задачу.")
-            empty.setStyleSheet("color: #71717a; padding: 24px;")
+            empty.setObjectName("emptyState")
             self.tasks_vbox.addWidget(empty)
             self.tasks_vbox.addStretch()
             return
@@ -1096,13 +1070,10 @@ class AxAIDesktopApp(QMainWindow):
             info_col = QVBoxLayout()
             task_lbl = QLabel(task.get("task", ""))
             task_lbl.setWordWrap(True)
-            task_lbl.setStyleSheet(
-                "color: #71717a; text-decoration: line-through; font-size: 13px;"
-                if task.get("completed") else "color: #f4f4f5; font-weight: 600; font-size: 13px;"
-            )
+            task_lbl.setObjectName("taskTitleDone" if task.get("completed") else "taskTitle")
             info_col.addWidget(task_lbl)
             meta_lbl = QLabel(f"{lec.get('subject', '')}  ·  Срок: {task.get('deadline', 'По графику')}")
-            meta_lbl.setStyleSheet("color: #fbbf24; font-size: 11px;")
+            meta_lbl.setObjectName("deadlineText")
             info_col.addWidget(meta_lbl)
             row.addLayout(info_col, stretch=1)
 
@@ -1116,7 +1087,7 @@ class AxAIDesktopApp(QMainWindow):
             )
             row.addWidget(prio_combo)
 
-            open_btn = QPushButton("Открыть лекцию")
+            open_btn = QPushButton("Открыть лекцию →")
             open_btn.clicked.connect(lambda checked=False, l_ref=lec: self.open_lecture_viewer(l_ref))
             row.addWidget(open_btn)
             self.tasks_vbox.addWidget(card)
@@ -1135,7 +1106,7 @@ class AxAIDesktopApp(QMainWindow):
 
     def open_add_task_dialog(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить задачу или дедлайн")
+        dlg.setWindowTitle("Добавить задачу")
         dlg.setFixedWidth(420)
         vbox = QVBoxLayout(dlg)
         vbox.setContentsMargins(20, 20, 20, 20)
@@ -1144,7 +1115,7 @@ class AxAIDesktopApp(QMainWindow):
         inp_task = QLineEdit()
         inp_task.setPlaceholderText("Что нужно сделать?")
         inp_deadline = QLineEdit()
-        inp_deadline.setPlaceholderText("Срок")
+        inp_deadline.setPlaceholderText("Дедлайн")
         prio_cb = QComboBox()
         prio_cb.addItem("Высокий", "high")
         prio_cb.addItem("Обычный", "medium")
@@ -1200,7 +1171,7 @@ class AxAIDesktopApp(QMainWindow):
         vbox.addLayout(btns)
         dlg.exec()
 
-    # память и резервные копии
+    
     def create_storage_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1216,7 +1187,7 @@ class AxAIDesktopApp(QMainWindow):
         c_vbox = QVBoxLayout(card)
         c_vbox.setContentsMargins(18, 16, 18, 16)
         self.storage_info_lbl = QLabel("")
-        self.storage_info_lbl.setStyleSheet("color: #e4e4e7; font-size: 13px;")
+        self.storage_info_lbl.setObjectName("storageInfo")
         self.storage_info_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         c_vbox.addWidget(self.storage_info_lbl)
         layout.addWidget(card)
@@ -1227,22 +1198,15 @@ class AxAIDesktopApp(QMainWindow):
         b_vbox.setContentsMargins(18, 16, 18, 16)
         b_vbox.setSpacing(8)
         b_title = QLabel("Резервная копия")
-        b_title.setStyleSheet("font-weight: 600; font-size: 14px;")
+        b_title.setObjectName("cardTitle")
         b_vbox.addWidget(b_title)
-        b_hint = QLabel(
-            "В один .zip попадают все лекции, задачи, формулы, история версий, закладки, профиль, "
-            "аватарка и настройки. Перед восстановлением текущая база сохраняется в папку backups_auto."
-        )
-        b_hint.setWordWrap(True)
-        b_hint.setStyleSheet("color: #a1a1aa; font-size: 12px;")
-        b_vbox.addWidget(b_hint)
-        self.chk_backup_audio = QCheckBox("Включить аудиозаписи (файл будет значительно больше)")
+        self.chk_backup_audio = QCheckBox("Включить аудиозаписи")
         b_vbox.addWidget(self.chk_backup_audio)
         b_row = QHBoxLayout()
-        make_btn = QPushButton("💾 Создать резервную копию…")
+        make_btn = QPushButton("Создать резервную копию…")
         make_btn.setObjectName("primaryBtn")
         make_btn.clicked.connect(self.create_backup_dialog)
-        restore_btn = QPushButton("♻️ Восстановить из копии…")
+        restore_btn = QPushButton("Восстановить из копии…")
         restore_btn.clicked.connect(self.restore_backup_dialog)
         b_row.addWidget(make_btn)
         b_row.addWidget(restore_btn)
@@ -1302,7 +1266,7 @@ class AxAIDesktopApp(QMainWindow):
         reply = QMessageBox.question(
             self, "Восстановление",
             f"Копия от {manifest.get('created_at', '?')}: лекций {manifest.get('lectures', '?')}.\n\n"
-            "Текущие данные будут заменены. Перед этим текущая база сохранится в папку backups_auto. Продолжить?",
+            "Текущие данные будут заменены. Продолжить?",
         )
         if reply != QMessageBox.Yes:
             return
@@ -1332,7 +1296,7 @@ class AxAIDesktopApp(QMainWindow):
     def clear_audio_files(self):
         reply = QMessageBox.question(
             self, "Подтверждение",
-            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы в базе останутся.",
+            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы сохранятся.",
         )
         if reply != QMessageBox.Yes:
             return
@@ -1348,70 +1312,58 @@ class AxAIDesktopApp(QMainWindow):
         self.refresh_storage_info()
         QMessageBox.information(self, "Очищено", f"Удалено аудиофайлов: {count}")
 
-    # ------------------------------------------------------------------
-    # 6. Настройки ИИ
-    # ------------------------------------------------------------------
+    
     def create_settings_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Настройки ИИ: распознавание речи и конспекты")
+        title = QLabel("Настройки")
         title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(title)
+
+        layout.addWidget(QLabel("Оформление:"))
+        self.cb_theme = QComboBox()
+        for value, label in THEME_CHOICES:
+            self.cb_theme.addItem(label, value)
+        self._select_data(self.cb_theme, self.app_settings.get("theme", "dark"))
+        self.cb_theme.currentIndexChanged.connect(self.on_theme_changed)
+        layout.addWidget(self.cb_theme)
 
         hw_card = QFrame()
         hw_card.setObjectName("card")
         hw_vbox = QVBoxLayout(hw_card)
         hw_vbox.setContentsMargins(16, 12, 16, 12)
-        self.hw_lbl = QLabel("Нажмите «Проверить», чтобы узнать характеристики ПК и состояние Ollama.")
+        self.hw_lbl = QLabel("Нажмите «Проверить», чтобы узнать характеристики ПК.")
         self.hw_lbl.setWordWrap(True)
-        self.hw_lbl.setStyleSheet("color: #a5b4fc; font-size: 12px;")
+        self.hw_lbl.setObjectName("accentText")
         hw_vbox.addWidget(self.hw_lbl)
-        hw_btn = QPushButton("🔍 Проверить железо и Ollama")
+        hw_btn = QPushButton("Проверить")
         hw_btn.clicked.connect(self.refresh_hardware_info)
         hw_vbox.addWidget(hw_btn, alignment=Qt.AlignLeft)
         layout.addWidget(hw_card)
 
-        layout.addWidget(QLabel("1. Распознавание речи:"))
-        self.cb_transcriber = QComboBox()
-        self.cb_transcriber.addItem("Локальный Faster-Whisper + Silero VAD (офлайн)", "local_whisper")
-        self.cb_transcriber.addItem("Облачный Gemini (нужен GEMINI_API_KEY, аудио уходит в облако)", "gemini_cloud")
-        self._select_data(self.cb_transcriber, self.app_settings.get("transcriber_backend", "local_whisper"))
-        layout.addWidget(self.cb_transcriber)
-
-        layout.addWidget(QLabel("Модель Whisper:"))
+        layout.addWidget(QLabel("Модель для распознавания речи:"))
         self.cb_whisper_size = QComboBox()
         self.cb_whisper_size.addItem("Автоподбор под железо", "auto")
         self.cb_whisper_size.addItem("large-v3-turbo (максимальная точность)", "large-v3-turbo")
-        self.cb_whisper_size.addItem("small (для компактных ноутбуков)", "small")
-        self.cb_whisper_size.addItem("base (самая лёгкая)", "base")
+        self.cb_whisper_size.addItem("small", "small")
+        self.cb_whisper_size.addItem("base", "base")
         self._select_data(self.cb_whisper_size, self.app_settings.get("whisper_model_size", "auto"))
         layout.addWidget(self.cb_whisper_size)
 
-        layout.addWidget(QLabel("2. Конспект, формулы и дедлайны:"))
-        self.cb_summarizer = QComboBox()
-        self.cb_summarizer.addItem("Авто: локальная Ollama (облако только если разрешено ниже)", "auto")
-        self.cb_summarizer.addItem("Только локальная Ollama", "local_ollama")
-        self.cb_summarizer.addItem("Облачный Gemini (нужен GEMINI_API_KEY, текст уходит в облако)", "gemini_cloud")
-        self._select_data(self.cb_summarizer, self.app_settings.get("summarizer_backend", "auto"))
-        layout.addWidget(self.cb_summarizer)
-
-        self.chk_cloud_fallback = QCheckBox("Если Ollama недоступна, использовать облачный Gemini (данные уйдут в облако)")
-        self.chk_cloud_fallback.setChecked(bool(self.app_settings.get("allow_cloud_fallback", False)))
-        layout.addWidget(self.chk_cloud_fallback)
-
+        layout.addWidget(QLabel("Конспекты, формулы и дедлайны:"))
         ollama_row = QHBoxLayout()
         self.inp_ollama_model = QLineEdit(self.app_settings.get("ollama_model", "qwen2.5:7b"))
         self.inp_ollama_url = QLineEdit(self.app_settings.get("ollama_url", "http://localhost:11434"))
-        ollama_row.addWidget(QLabel("Модель Ollama:"))
+        ollama_row.addWidget(QLabel("Модель:"))
         ollama_row.addWidget(self.inp_ollama_model)
         ollama_row.addWidget(QLabel("Адрес:"))
         ollama_row.addWidget(self.inp_ollama_url)
         layout.addLayout(ollama_row)
 
-        self.noise_check = QCheckBox("Фильтрация тишины и шума аудитории (Silero VAD)")
+        self.noise_check = QCheckBox("Фильтрация шума")
         self.noise_check.setChecked(bool(self.app_settings.get("silero_vad", True)))
         layout.addWidget(self.noise_check)
 
@@ -1419,7 +1371,7 @@ class AxAIDesktopApp(QMainWindow):
         self.tasks_check.setChecked(bool(self.app_settings.get("auto_extract_tasks", True)))
         layout.addWidget(self.tasks_check)
 
-        save_btn = QPushButton("💾 Сохранить настройки")
+        save_btn = QPushButton("Сохранить настройки")
         save_btn.setObjectName("primaryBtn")
         save_btn.clicked.connect(self.save_ai_settings)
         layout.addWidget(save_btn)
@@ -1431,6 +1383,15 @@ class AxAIDesktopApp(QMainWindow):
     def _select_data(combo: QComboBox, value):
         idx = combo.findData(value)
         combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def on_theme_changed(self):
+        name = self.cb_theme.currentData()
+        self.app_settings["theme"] = name
+        self.settings_repo.save_settings({"theme": name})
+        self.is_dark = apply_theme(QApplication.instance(), name)
+        self.latex_preview.set_dark_mode(self.is_dark)
+        if self.current_lecture:
+            self.latex_preview.render_lecture(self.current_lecture)
 
     def refresh_hardware_info(self):
         self.hardware_checked = True
@@ -1450,10 +1411,7 @@ class AxAIDesktopApp(QMainWindow):
     def save_ai_settings(self):
         self.app_settings = {
             **self.app_settings,
-            "transcriber_backend": self.cb_transcriber.currentData(),
             "whisper_model_size": self.cb_whisper_size.currentData(),
-            "summarizer_backend": self.cb_summarizer.currentData(),
-            "allow_cloud_fallback": self.chk_cloud_fallback.isChecked(),
             "ollama_model": self.inp_ollama_model.text().strip() or "qwen2.5:7b",
             "ollama_url": self.inp_ollama_url.text().strip() or "http://localhost:11434",
             "silero_vad": self.noise_check.isChecked(),
@@ -1462,14 +1420,14 @@ class AxAIDesktopApp(QMainWindow):
         self.settings_repo.save_settings(self.app_settings)
         QMessageBox.information(self, "Настройки", "Настройки сохранены.")
 
-    # профиль
+
     def create_profile_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Профиль студента")
+        title = QLabel("Профиль")
         title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(title)
 
@@ -1484,15 +1442,12 @@ class AxAIDesktopApp(QMainWindow):
         card_row.addWidget(self.profile_avatar_lbl)
 
         avatar_col = QVBoxLayout()
-        upload_btn = QPushButton("📷 Загрузить аватарку (256×256)")
+        upload_btn = QPushButton("Загрузить фото")
         upload_btn.clicked.connect(self.choose_user_avatar)
         avatar_col.addWidget(upload_btn)
-        reset_btn = QPushButton("🔄 Сбросить к аксолотлю по умолчанию")
+        reset_btn = QPushButton("Сбросить")
         reset_btn.clicked.connect(self.reset_user_avatar)
         avatar_col.addWidget(reset_btn)
-        hint = QLabel("Иконка приложения AxAI не меняется при смене аватарки.")
-        hint.setStyleSheet("color: #a1a1aa; font-size: 11px;")
-        avatar_col.addWidget(hint)
         card_row.addLayout(avatar_col)
         card_row.addStretch()
         layout.addWidget(id_card)
@@ -1512,7 +1467,7 @@ class AxAIDesktopApp(QMainWindow):
             layout.addWidget(QLabel(label))
             layout.addWidget(field)
 
-        save_btn = QPushButton("💾 Сохранить профиль")
+        save_btn = QPushButton("Сохранить профиль")
         save_btn.setObjectName("primaryBtn")
         save_btn.clicked.connect(self.save_profile_data)
         layout.addWidget(save_btn)
@@ -1543,14 +1498,39 @@ class AxAIDesktopApp(QMainWindow):
         self.refresh_profile_widgets()
         QMessageBox.information(self, "Профиль", "Профиль сохранён.")
 
-    # импорт pdf markdown
+    
     def handle_import_document(self):
+        if self.import_worker is not None and self.import_worker.isRunning():
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Учебный документ (PDF / Markdown / текст)", "", "Документы (*.pdf *.md *.txt *.tex)"
         )
         if not file_path:
             return
-        parsed = parse_pdf_document(file_path)
+
+        dialog = QProgressDialog("Чтение документа...", "Отмена", 0, 100, self)
+        dialog.setWindowTitle("Импорт документа")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+
+        worker = ImportDocumentWorker(file_path, self.app_settings)
+        self.import_worker = worker
+        worker.progress.connect(lambda pct, msg: (dialog.setValue(pct), dialog.setLabelText(msg)))
+        dialog.canceled.connect(worker.requestInterruption)
+        worker.finished.connect(lambda res: self._on_import_done(dialog, res))
+        worker.error.connect(lambda msg: self._on_import_error(dialog, msg))
+        worker.start()
+
+    def _on_import_error(self, dialog: QProgressDialog, message: str):
+        dialog.close()
+        if "отменён" not in message:
+            QMessageBox.warning(self, "Импорт документа", message)
+
+    def _on_import_done(self, dialog: QProgressDialog, parsed: dict):
+        dialog.close()
         lec_id = f"doc-{int(datetime.now().timestamp())}"
         new_lecture = {
             "id": lec_id,
@@ -1570,11 +1550,13 @@ class AxAIDesktopApp(QMainWindow):
         self.refresh_history_list()
         self.refresh_deadlines_list()
         self.open_lecture_viewer(saved)
+        if parsed.get("warning"):
+            QMessageBox.warning(self, "Импорт документа", parsed["warning"])
 
     def closeEvent(self, event):
         if self.is_recording:
             self.recorder.stop()
-        for worker in (self.worker, self.expand_worker):
+        for worker in (self.worker, self.expand_worker, self.import_worker):
             if worker is not None and worker.isRunning():
                 worker.requestInterruption()
                 worker.wait(3000)
