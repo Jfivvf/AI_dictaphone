@@ -10,6 +10,8 @@ URGENT_KEYWORDS = ("срочн", "коллоквиум", "экзамен", "ко
 
 
 class DocumentError(Exception):
+    pass
+    
 def extract_raw_text(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
