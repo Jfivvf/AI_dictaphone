@@ -1,20 +1,17 @@
-"""Чтение аудио в массив float32 (16 кГц, моно). Не зависит от версии PyAV, которую ставит faster-whisper."""
 import shutil
 import subprocess
 import wave
 from typing import List, Optional
-
 import numpy as np
 
 SAMPLE_RATE = 16000
 
 
 class AudioDecodeError(RuntimeError):
-    """Файл нельзя прочитать как аудио."""
+    pass
 
 
 def _read_plain_wav(path: str) -> Optional[np.ndarray]:
-    """Быстрый путь для записей приложения: WAV 16 кГц, моно, 16 бит."""
     try:
         with wave.open(path, "rb") as wf:
             if wf.getsampwidth() != 2 or wf.getnchannels() != 1 or wf.getframerate() != SAMPLE_RATE:
@@ -29,7 +26,6 @@ def _read_plain_wav(path: str) -> Optional[np.ndarray]:
 
 def _read_with_av(path: str) -> np.ndarray:
     import av
-
     resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
     parts: List[np.ndarray] = []
 
@@ -76,7 +72,6 @@ def _read_with_ffmpeg(path: str) -> np.ndarray:
 
 
 def decode_audio_16k(path: str) -> np.ndarray:
-    """WAV приложения читается напрямую, остальное через PyAV, а при его сбое через ffmpeg, если он установлен."""
     audio = _read_plain_wav(path)
     if audio is not None:
         return audio
