@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QThread, Signal
@@ -10,6 +11,7 @@ from ml.engine import (
     create_summarizer,
     create_transcriber,
 )
+from model_setup import SetupError, run_setup
 from pdf_importer import DocumentError, keyword_tasks_and_formulas, read_document
 from task_detection import extract_tasks
 
@@ -30,8 +32,8 @@ class TranscriptionWorker(QThread):
     ):
         super().__init__()
         self.audio_path = audio_path
-        self.title = title or "Запись"
-        self.subject = subject or "Дисциплина"
+        self.title = title or "Запись лекции"
+        self.subject = subject or "Учебная дисциплина"
         self.ctx = LectureContext(
             subject=subject, title=title, lecturer=lecturer, notes=ai_context
         )
@@ -42,8 +44,9 @@ class TranscriptionWorker(QThread):
 
     def run(self) -> None:
         cancel = self.isInterruptionRequested
+        started = time.monotonic()
         try:
-            self.progress.emit(8, "Подготовка...")
+            self.progress.emit(8, "Подготовка распознавания речи...")
 
             try:
                 transcriber = create_transcriber(self.settings)
@@ -60,6 +63,7 @@ class TranscriptionWorker(QThread):
                 self.error.emit(f"Не удалось распознать речь: {err}\nАудиозапись сохранена: {self.audio_path}")
                 return
 
+            asr_done = time.monotonic()
             full_text = tr.get("full_text", "").strip()
             segments = tr.get("segments", [])
 
@@ -68,7 +72,7 @@ class TranscriptionWorker(QThread):
             formulas: List[Dict[str, Any]] = []
             warning = ""
 
-            if full_text or self.ctx.notes.strip():
+            if full_text:
                 try:
                     summarizer = create_summarizer(self.settings)
                     res = summarizer.summarize_lecture(
@@ -88,7 +92,7 @@ class TranscriptionWorker(QThread):
                     warning = f"Конспект не построен: {err}"
 
             if not summary_md:
-                notes = f"\n\n### Контекст \n{self.ctx.notes}\n" if self.ctx.notes else ""
+                notes = f"\n\n### Контекст студента\n{self.ctx.notes}\n" if self.ctx.notes else ""
                 summary_md = (
                     f"## {self.title}\n\n**Предмет:** {self.subject}{notes}\n\n"
                     f"### Стенограмма\n\n{full_text or 'Речь не распознана.'}"
@@ -96,8 +100,10 @@ class TranscriptionWorker(QThread):
                 if self.settings.get("auto_extract_tasks", True):
                     tasks = extract_tasks(full_text)
 
+            finished_at = time.monotonic()
             self.progress.emit(100, "Готово!")
             self.finished.emit({
+                "timing": {"asr_sec": asr_done - started, "summary_sec": finished_at - asr_done},
                 "text": summary_md,
                 "raw_transcript": full_text,
                 "segments": segments,
@@ -167,7 +173,7 @@ class ImportDocumentWorker(QThread):
             raw_text = doc["raw_text"].strip()
             if len(raw_text) < 50:
                 self.error.emit(
-                    "В документе нет текста. "
+                    "В документе нет текстового слоя (похоже на скан). "
                     "Распознавание сканов пока не поддерживается."
                 )
                 return
@@ -217,3 +223,28 @@ class ImportDocumentWorker(QThread):
             self.error.emit(str(err))
         except Exception as err:
             self.error.emit(str(err))
+
+
+class SetupWorker(QThread):
+    progress = Signal(int, str)
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(self, settings: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        self.settings = settings or {}
+
+    def run(self) -> None:
+        try:
+            message = run_setup(
+                self.settings,
+                lambda pct, msg: self.progress.emit(pct, msg),
+                self.isInterruptionRequested,
+            )
+            self.finished.emit(message)
+        except CancelledError:
+            self.error.emit("Установка отменена.")
+        except SetupError as err:
+            self.error.emit(str(err))
+        except Exception as err:
+            self.error.emit(f"Установка не удалась: {err}")
