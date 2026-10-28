@@ -1,17 +1,20 @@
-"""Запись звука с микрофона: данные пишутся на диск по ходу записи, есть закладки."""
+import math
 import os
 import queue
 import threading
 import wave
 from typing import Any, Dict, List, Optional
+import numpy as np
+
+LEVEL_FLOOR_DB = -80.0
 
 
 class MicrophoneRecorder:
-    """Захват 16 кГц моно через sounddevice с потоковой записью в WAV."""
-
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
         self.is_recording = False
+        self.paused = False
+        self._peak_db = LEVEL_FLOOR_DB
         self.bookmarks: List[Dict[str, Any]] = []
         self._queue: "queue.Queue[Optional[Any]]" = queue.Queue()
         self._writer: Optional[threading.Thread] = None
@@ -33,6 +36,7 @@ class MicrophoneRecorder:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         self._path = output_path
         self._frames_written = 0
+        self.paused = False
         self.bookmarks = []
         self._queue = queue.Queue()
 
@@ -42,8 +46,13 @@ class MicrophoneRecorder:
         self._wav.setframerate(self.sample_rate)
 
         def callback(indata, frames, time_info, status):
-            if self.is_recording:
-                self._queue.put(indata.copy())
+            if not self.is_recording or self.paused:
+                return
+            rms = float(np.sqrt(np.mean((indata.astype(np.float32) / 32768.0) ** 2)))
+            level = 20.0 * math.log10(rms) if rms > 1e-5 else LEVEL_FLOOR_DB
+            if level > self._peak_db:
+                self._peak_db = level
+            self._queue.put(indata.copy())
 
         try:
             self._stream = sd.InputStream(
@@ -71,14 +80,25 @@ class MicrophoneRecorder:
             self._wav.close()
             self._wav = None
 
+    def pause(self) -> None:
+        self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
+
+    def take_level_db(self) -> float:
+        level = self._peak_db
+        self._peak_db = LEVEL_FLOOR_DB
+        return level
+
     def add_bookmark(self, note: str = "") -> Dict[str, Any]:
         mark = {"time_sec": int(self.elapsed_seconds), "note": note.strip()}
         self.bookmarks.append(mark)
         return mark
 
     def stop(self) -> str:
-        """Останавливает запись и возвращает путь к файлу или пустую строку, если звука не было."""
         self.is_recording = False
+        self.paused = False
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -95,7 +115,6 @@ class MicrophoneRecorder:
 
 
 def recover_wav_header(path: str) -> bool:
-    """Чинит заголовок WAV, оставшийся нулевым после аварийного завершения записи."""
     size = os.path.getsize(path)
     if size <= 44:
         return False
