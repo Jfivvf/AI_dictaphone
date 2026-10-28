@@ -1,4 +1,3 @@
-"""Резервные копии: консистентный снимок SQLite, аватарка и (по желанию) аудио в одном zip."""
 import json
 import os
 import shutil
@@ -16,7 +15,7 @@ AUDIO_PREFIX = "audio/"
 
 
 class BackupError(Exception):
-    """Копию нельзя создать или восстановить."""
+   pass
 
 
 def _snapshot(src_path: str, dst_path: str) -> None:
@@ -38,7 +37,6 @@ def _count_lectures(db_path: str) -> int:
 
 
 def create_backup(storage_path: str, db_path: str, dest_zip: str, audio_dir: str = "", include_audio: bool = False) -> Dict[str, Any]:
-    """Создаёт zip-копию. Возвращает манифест (число лекций, размер файлов аудио)."""
     with tempfile.TemporaryDirectory() as tmp:
         snapshot = os.path.join(tmp, DB_NAME)
         _snapshot(db_path, snapshot)
@@ -80,7 +78,6 @@ def read_manifest(zip_path: str) -> Dict[str, Any]:
 
 
 def restore_backup(zip_path: str, storage_path: str, db_path: str, audio_dir: str) -> Dict[str, Any]:
-    """Заменяет текущую базу данными из копии. Перед заменой текущая база сохраняется в backups_auto/."""
     manifest = read_manifest(zip_path)
     os.makedirs(audio_dir, exist_ok=True)
 
