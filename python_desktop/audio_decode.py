@@ -26,6 +26,7 @@ def _read_plain_wav(path: str) -> Optional[np.ndarray]:
 
 def _read_with_av(path: str) -> np.ndarray:
     import av
+
     resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
     parts: List[np.ndarray] = []
 
