@@ -32,8 +32,8 @@ class TranscriptionWorker(QThread):
     ):
         super().__init__()
         self.audio_path = audio_path
-        self.title = title or "Запись лекции"
-        self.subject = subject or "Учебная дисциплина"
+        self.title = title or "Запись"
+        self.subject = subject or "Дисциплина"
         self.ctx = LectureContext(
             subject=subject, title=title, lecturer=lecturer, notes=ai_context
         )
@@ -46,7 +46,7 @@ class TranscriptionWorker(QThread):
         cancel = self.isInterruptionRequested
         started = time.monotonic()
         try:
-            self.progress.emit(8, "Подготовка распознавания речи...")
+            self.progress.emit(8, "Подготовка...")
 
             try:
                 transcriber = create_transcriber(self.settings)
@@ -173,7 +173,7 @@ class ImportDocumentWorker(QThread):
             raw_text = doc["raw_text"].strip()
             if len(raw_text) < 50:
                 self.error.emit(
-                    "В документе нет текстового слоя (похоже на скан). "
+                    "В документе нет текста. "
                     "Распознавание сканов пока не поддерживается."
                 )
                 return
@@ -185,7 +185,7 @@ class ImportDocumentWorker(QThread):
             formulas: List[Dict[str, Any]] = []
             warning = ""
 
-            self.progress.emit(5, "Построение конспекта локальной моделью...")
+            self.progress.emit(5, "Построение конспекта...")
             try:
                 summarizer = create_summarizer(self.settings)
                 res = summarizer.summarize_lecture(
