@@ -1,4 +1,3 @@
-"""Копирует KaTeX из node_modules в assets/katex (запускать из корня проекта: python python_desktop/tools/vendor_katex.py)."""
 import shutil
 import sys
 from pathlib import Path
