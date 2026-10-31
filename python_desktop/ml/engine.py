@@ -6,7 +6,9 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
 from audio_decode import decode_audio_16k
+from paths import MODELS_DIR
 from export.exporters import repair_corrupted_latex
 
 ProgressCallback = Callable[[int, str], None]
@@ -17,14 +19,19 @@ class AiUnavailableError(RuntimeError):
     pass
 
 
+class NotEnoughTextError(RuntimeError):
+    pass
+
+
+MIN_TRANSCRIPT_CHARS = 300
+
+
 class CancelledError(Exception):
     pass
 
 
 @dataclass
 class LectureContext:
-    pass
-
     subject: str = ""
     title: str = ""
     lecturer: str = ""
@@ -67,6 +74,7 @@ def extract_terms(notes: str, limit: int = 25) -> List[str]:
 
 
 def build_asr_prompts(ctx: LectureContext) -> Tuple[str, str]:
+    """Возвращает (initial_prompt, hotwords) для faster-whisper."""
     head = ". ".join(p.strip() for p in (ctx.subject, ctx.title) if p.strip())
     notes = re.sub(r"\s+", " ", ctx.notes or "").strip()
     initial = " ".join(p for p in (head + "." if head else "", notes) if p)[:600]
@@ -134,6 +142,21 @@ def chunk_text(text: str, size: int) -> List[str]:
             chunks.append(piece)
         start = end
     return chunks
+
+
+def clean_model_markdown(text: str) -> str:
+    t = (text or "").strip()
+    fence = re.search(r"```[A-Za-z]*[ \t]*\n", t)
+    if fence and not re.search(r"(?m)^#{1,3} \S", t[: fence.start()]):
+        inner = t[fence.end():]
+        end = inner.find("\n```")
+        inner = inner if end == -1 else inner[:end]
+        if re.search(r"(?m)^#{1,3} \S", inner):
+            t = inner
+    heading = re.search(r"(?m)^#{1,3} \S", t)
+    if heading and heading.start() > 0:
+        t = t[heading.start():]
+    return t.strip()
 
 
 def split_tasks_block(note: str) -> Tuple[str, str]:
@@ -204,10 +227,12 @@ class HardwareInspector:
     @staticmethod
     def hardware() -> Dict[str, Any]:
         cpu_cores = os.cpu_count() or 4
+        physical_cores = max(1, cpu_cores // 2)
         ram_gb = 8.0
         try:
             import psutil
             ram_gb = round(psutil.virtual_memory().total / (1024 ** 3), 1)
+            physical_cores = psutil.cpu_count(logical=False) or physical_cores
         except Exception:
             try:
                 ram_gb = round(
@@ -244,6 +269,7 @@ class HardwareInspector:
 
         return {
             "cpu_cores": cpu_cores,
+            "physical_cores": physical_cores,
             "ram_gb": ram_gb,
             "has_cuda": has_cuda,
             "gpu_name": gpu_name,
@@ -281,22 +307,59 @@ def _format_time(seconds: float) -> str:
 
 _WHISPER_CACHE: Dict[Tuple[str, str, str, int], Any] = {}
 
+SPEED_PRESETS = {
+    "fast": {"beam_size": 1, "batch_size": 8},
+    "balanced": {"beam_size": 2, "batch_size": 8},
+    "accurate": {"beam_size": 5, "batch_size": 0},
+}
+
+
+def find_local_whisper(name: str) -> Optional[str]:
+    if os.path.isdir(name):
+        return name
+    try:
+        from faster_whisper.utils import download_model
+    except ImportError:
+        return None
+    for cache_dir in (MODELS_DIR, None):
+        try:
+            return download_model(name, cache_dir=cache_dir, local_files_only=True)
+        except Exception:
+            continue
+    return None
+
 
 def _load_whisper(model_name: str, device: str, compute_type: str, cpu_threads: int):
     key = (model_name, device, compute_type, cpu_threads)
     if key not in _WHISPER_CACHE:
         from faster_whisper import WhisperModel
+        source = find_local_whisper(model_name) or model_name
         _WHISPER_CACHE[key] = WhisperModel(
-            model_name, device=device, compute_type=compute_type, cpu_threads=cpu_threads
+            source, device=device, compute_type=compute_type, cpu_threads=cpu_threads,
+            download_root=MODELS_DIR,
         )
     return _WHISPER_CACHE[key]
 
 
+def _call_with_supported_options(func, audio, options: Dict[str, Any]):
+    opts = dict(options)
+    for _ in range(len(opts) + 1):
+        try:
+            return func(audio, **opts)
+        except TypeError as err:
+            match = re.search(r"unexpected keyword argument '(\w+)'", str(err))
+            if not match or match.group(1) not in opts:
+                raise
+            opts.pop(match.group(1))
+    raise RuntimeError("Не удалось вызвать распознавание речи.")
+
+
 class FasterWhisperTranscriber(BaseTranscriber):
-    def __init__(self, model_size: str = "auto", use_vad: bool = True, beam_size: int = 5):
+    def __init__(self, model_size: str = "auto", use_vad: bool = True, beam_size: int = 2, batch_size: int = 8):
         self.model_size = model_size
         self.use_vad = use_vad
         self.beam_size = beam_size
+        self.batch_size = batch_size
 
     def transcribe(self, audio_path, ctx, progress_cb=None, cancel_cb=None):
         if progress_cb:
@@ -307,16 +370,17 @@ class FasterWhisperTranscriber(BaseTranscriber):
         model_name = hw["recommended_whisper"] if self.model_size == "auto" else self.model_size
         device = "cuda" if hw["has_cuda"] else "cpu"
         compute_type = "float16" if hw["has_cuda"] else "int8"
+        threads = min(8, max(2, hw["physical_cores"]))
 
         if progress_cb:
             progress_cb(12, f"Загрузка модели Whisper ({model_name}, {device.upper()})...")
-        model = _load_whisper(model_name, device, compute_type, max(2, hw["cpu_cores"] - 1))
+        model = _load_whisper(model_name, device, compute_type, threads)
 
         initial_prompt, hotwords = build_asr_prompts(ctx)
         options: Dict[str, Any] = {
             "language": "ru",
             "beam_size": self.beam_size,
-            "vad_filter": self.use_vad,
+            "vad_filter": True if self.batch_size > 0 else self.use_vad,
             "vad_parameters": {"min_silence_duration_ms": 500},
             "condition_on_previous_text": False,
         }
@@ -325,13 +389,21 @@ class FasterWhisperTranscriber(BaseTranscriber):
         if hotwords:
             options["hotwords"] = hotwords
 
+        runner = model.transcribe
+        batched = False
+        if self.batch_size > 0 and self.use_vad:
+            try:
+                from faster_whisper import BatchedInferencePipeline
+                runner = BatchedInferencePipeline(model=model).transcribe
+                options["batch_size"] = self.batch_size
+                batched = True
+            except ImportError:
+                pass
+
         if progress_cb:
-            progress_cb(22, "Распознавание речи" + (" с учётом контекста..." if hotwords or initial_prompt else "..."))
-        try:
-            segments_iter, info = model.transcribe(audio, **options)
-        except TypeError:
-            options.pop("hotwords", None)
-            segments_iter, info = model.transcribe(audio, **options)
+            note = " с учётом контекста" if hotwords or initial_prompt else ""
+            progress_cb(22, f"Распознавание речи{note}{' (пакетный режим)' if batched else ''}...")
+        segments_iter, info = _call_with_supported_options(runner, audio, options)
 
         total = max(1.0, float(getattr(info, "duration", 0.0) or 1.0))
         segments: List[Dict[str, Any]] = []
@@ -356,7 +428,6 @@ class FasterWhisperTranscriber(BaseTranscriber):
                     f"Распознавание речи: {int(seg.end // 60)} из {max(1, int(total // 60))} мин ({int(ratio * 100)}%)...",
                 )
         return {"full_text": " ".join(parts).strip(), "segments": segments}
-
 
 
 class BaseSummarizer(ABC):
@@ -444,13 +515,33 @@ class LocalLlmSummarizer(BaseSummarizer):
     INPUT_BUDGET = 20000
     SECTION_CHARS = 8000
 
+    DETAIL = {
+        "fast": {
+            "map": 600, "reduce": 2500, "meta": 1200,
+            "map_hint": "Не более 250 слов, только тезисы.",
+            "reduce_hint": "Объём: примерно 1200–1800 слов, по существу, без воды.",
+        },
+        "full": {
+            "map": 2048, "reduce": 6144, "meta": 2048,
+            "map_hint": "Без сокращений.",
+            "reduce_hint": "Объём: максимально подробно.",
+        },
+    }
+    STRICT_RULES = (
+        "Используй только факты из материала ниже, ничего не выдумывай и не додумывай. "
+        "Если для раздела в материале нет сведений, напиши «В записи не освещено». "
+        "Начни ответ сразу с заголовка «## 1.» без вступлений и пояснений, не оборачивай ответ в блок кода."
+    )
+
     def __init__(
         self,
         model_name: str = "qwen2.5:7b",
         ollama_url: str = "http://localhost:11434",
         num_ctx: int = 16384,
         read_timeout: int = 600,
+        detail: str = "fast",
     ):
+        self.detail = self.DETAIL.get(detail, self.DETAIL["fast"])
         self.model_name = model_name
         self.ollama_url = ollama_url.rstrip("/")
         self.num_ctx = num_ctx
@@ -516,13 +607,13 @@ class LocalLlmSummarizer(BaseSummarizer):
             "конспект без повторов. Сохрани все определения, теоремы, формулы LaTeX ($...$ и $$...$$) "
             "и примеры.\n\n" + "\n\n".join(notes)
         )
-        return self._call(prompt, num_predict=2048, cancel_cb=cancel_cb) or "\n\n".join(notes)
+        return self._call(prompt, num_predict=self.detail["map"] * 2, cancel_cb=cancel_cb) or "\n\n".join(notes)
 
     def _fit_notes(self, notes: List[str], ctx: LectureContext, progress_cb, cancel_cb) -> str:
         for _ in range(4):
             if len("\n\n".join(notes)) <= self.INPUT_BUDGET or len(notes) < 2:
                 break
-            self._report(progress_cb, 82, "Локальная LLM: сжатие промежуточных конспектов...")
+            self._report(progress_cb, 82, "Сжатие промежуточных конспектов...")
             groups: List[List[str]] = []
             current: List[str] = []
             size = 0
@@ -539,6 +630,11 @@ class LocalLlmSummarizer(BaseSummarizer):
 
     def summarize_lecture(self, transcript_text, ctx, progress_cb=None, cancel_cb=None):
         text = (transcript_text or "").strip()
+        if len(text) < MIN_TRANSCRIPT_CHARS:
+            raise NotEnoughTextError(
+                f"Распознано слишком мало текста ({len(text)} символов). Конспект не был построен. "
+                "Проверьте стенограмму и качество записи."
+            )
         header = ctx.for_prompt()
         task_notes: List[str] = []
 
@@ -555,11 +651,11 @@ class LocalLlmSummarizer(BaseSummarizer):
                     f"Локальная LLM ({self.model_name}): блок {idx + 1} из {len(chunks)}...",
                 )
                 raw = self._call(
-                    f"{header}\n\nИзвлеки из фрагмента лекции все определения, теоремы, формулы LaTeX "
-                    "($...$ и $$...$$) и примеры без сокращений. В конце отдельной строкой «ЗАДАНИЯ:» "
-                    "перечисли всё, что лектор задал студентам, со сроками. Если заданий не было, "
-                    "напиши «ЗАДАНИЯ: нет».\n\n" + chunk,
-                    num_predict=2048,
+                    f"{header}\n\nИзвлеки из фрагмента лекции определения, ключевые мысли, формулы LaTeX "
+                    f"($...$ и $$...$$) и примеры. {self.detail['map_hint']} Без вступлений. "
+                    "В конце отдельной строкой «ЗАДАНИЯ:» перечисли всё, что лектор задал студентам, "
+                    "со сроками. Если заданий не было, напиши «ЗАДАНИЯ: нет».\n\n" + chunk,
+                    num_predict=self.detail["map"],
                     cancel_cb=cancel_cb,
                 )
                 body, tasks = split_tasks_block(raw)
@@ -570,29 +666,31 @@ class LocalLlmSummarizer(BaseSummarizer):
             source = self._fit_notes(notes, ctx, progress_cb, cancel_cb)
             task_source = "\n".join(task_notes)
 
-        self._report(progress_cb, 84, f"Локальная LLM ({self.model_name}): сборка конспекта из 6 разделов...")
+        self._report(progress_cb, 84, f"Локальная LLM ({self.model_name}): сборка конспекта...")
         summary_md = self._call(
-            f"{header}\n\nНа основе материала составь подробный университетский конспект в Markdown "
-            "с формулами LaTeX ($...$ и $$...$$) строго из 6 разделов:\n"
+            f"{header}\n\nНа основе материала составь университетский конспект в Markdown "
+            f"с формулами LaTeX ($...$ и $$...$$). {self.detail['reduce_hint']}\n{self.STRICT_RULES}\n"
+            "Строго 6 разделов:\n"
             "## 1. Введение и контекст темы\n"
             "## 2. Ключевые понятия и строгие определения\n"
             "## 3. Подробный теоретический разбор\n"
             "## 4. Математический аппарат, формулы и выводы\n"
             "## 5. Разобранные примеры и практическое применение\n"
-            "## 6. Итоговые выводы и вопросы к экзамену\n\n"
+            "## 6. Итоговые выводы\n\n"
             f"Материал:\n{source}",
-            num_predict=6144,
+            num_predict=self.detail["reduce"],
             cancel_cb=cancel_cb,
         )
+        summary_md = clean_model_markdown(summary_md)
 
-        self._report(progress_cb, 93, "Локальная LLM: поиск заданий и формул...")
+        self._report(progress_cb, 93, "Поиск заданий и формул...")
         meta_text = f"{task_source}\n\nКонспект:\n{summary_md[:8000]}".strip()
         meta_raw = self._call(
             "Найди в тексте учебные задания, домашние работы и дедлайны, названные лектором, "
             "и ключевые формулы LaTeX. Не выдумывай задания: если их нет, верни пустой массив tasks. "
             'Ответ строго JSON с ключами "tasks" (task, deadline, priority: high|medium|low) '
             'и "formulas" (title, latex без знаков $, context).\n\n' + meta_text,
-            num_predict=2048,
+            num_predict=self.detail["meta"],
             schema=_META_SCHEMA,
             cancel_cb=cancel_cb,
         )
@@ -616,11 +714,13 @@ class LocalLlmSummarizer(BaseSummarizer):
                 f"{header}\n\nРасширь этот раздел конспекта в 3–4 раза: строгие определения, "
                 "пошаговый вывод формул с расшифровкой переменных, примеры с решением. "
                 "Сохрани заголовок раздела и формулы LaTeX ($...$ и $$...$$). "
-                "Верни только текст раздела в Markdown.\n\n"
+                "Добавляй только то, что следует из стенограммы, ничего не выдумывай. "
+                "Верни только текст раздела в Markdown, без вступлений и без блока кода.\n\n"
                 f"Раздел:\n{section}\n\nФрагменты стенограммы:\n{excerpt}",
                 num_predict=4096,
                 cancel_cb=cancel_cb,
             )
+            piece = clean_model_markdown(piece)
             heading = section.splitlines()[0] if section.startswith("#") else ""
             if piece and heading and not piece.lstrip().startswith("#"):
                 piece = f"{heading}\n\n{piece}"
@@ -630,19 +730,21 @@ class LocalLlmSummarizer(BaseSummarizer):
 
 
 def create_transcriber(settings: Dict[str, Any]) -> BaseTranscriber:
+    preset = SPEED_PRESETS.get(settings.get("whisper_speed", "balanced"), SPEED_PRESETS["balanced"])
     return FasterWhisperTranscriber(
         model_size=settings.get("whisper_model_size", "auto"),
         use_vad=bool(settings.get("silero_vad", True)),
+        beam_size=preset["beam_size"],
+        batch_size=preset["batch_size"],
     )
 
 
 def create_summarizer(settings: Dict[str, Any]) -> BaseSummarizer:
-    """Возвращает локальный конспектор на базе Ollama. Данные не покидают компьютер."""
     url = settings.get("ollama_url", "http://localhost:11434")
     wanted = settings.get("ollama_model", "qwen2.5:7b")
     online, installed = check_ollama(url)
     if not online:
-        raise AiUnavailableError(f"Сервер Ollama не запущен по адресу {url}. Запустите Ollama и повторите.")
+        raise AiUnavailableError(f"Сервер Ollama не запущен на {url}. Запустите Ollama и повторите.")
     model = pick_installed_model(wanted, installed)
     if not model:
         raise AiUnavailableError(f"В Ollama нет модели {wanted}. Установите её командой: ollama pull {wanted}")
@@ -651,4 +753,5 @@ def create_summarizer(settings: Dict[str, Any]) -> BaseSummarizer:
         ollama_url=url,
         num_ctx=int(settings.get("ollama_num_ctx", 16384)),
         read_timeout=int(settings.get("ollama_timeout", 600)),
+        detail=settings.get("summary_detail", "fast"),
     )
