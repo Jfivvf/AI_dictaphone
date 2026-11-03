@@ -10,26 +10,6 @@ import sys
 import json
 from datetime import datetime
 
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
-
-
-def app_icon_pixmap(size: int = 64) -> QPixmap:
-    icon_path = os.path.join(BASE_DIR, "..", "public", "logo.png")
-    icon_path = os.path.abspath(icon_path)
-
-    pix = QPixmap(icon_path)
-    if pix.isNull():
-        return draw_fixed_app_icon_pixmap(size)
-
-    return pix.scaled(
-        size, size,
-        Qt.KeepAspectRatio,
-        Qt.SmoothTransformation,
-    )
-
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (
@@ -59,7 +39,24 @@ from ui.latex_preview import (
     pixmap_from_png_bytes,
 )
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
+
+def app_icon_pixmap(size: int = 64) -> QPixmap:
+    icon_path = os.path.join(BASE_DIR, "..", "public", "logo.png")
+    icon_path = os.path.abspath(icon_path)
+
+    pix = QPixmap(icon_path)
+    if pix.isNull():
+        return draw_fixed_app_icon_pixmap(size)
+
+    return pix.scaled(
+        size, size,
+        Qt.KeepAspectRatio,
+        Qt.SmoothTransformation,
+    )
 
 def format_mmss(seconds: int) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
