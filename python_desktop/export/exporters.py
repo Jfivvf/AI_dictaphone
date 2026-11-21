@@ -7,10 +7,52 @@ from typing import Any, Dict, List, Optional
 import markdown as md_lib
 
 
+_MD_FENCE_OPEN_RE = re.compile(r"```\s*(markdown|md)\s*", re.IGNORECASE)
+
+
+def unwrap_markdown_fences(text: str) -> str:
+    if "```" not in text:
+        return text
+    lines = text.split("\n")
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        explicit = bool(_MD_FENCE_OPEN_RE.fullmatch(stripped))
+        bare_first = stripped == "```" and not any(l.strip() for l in out)
+        if not (explicit or bare_first):
+            out.append(line)
+            i += 1
+            continue
+        inner: List[str] = []
+        depth = 0
+        j = i + 1
+        closed = False
+        while j < len(lines):
+            s = lines[j].strip()
+            if s.startswith("```"):
+                if s == "```" and depth == 0:
+                    closed = True
+                    break
+                depth += -1 if s == "```" else 1
+            inner.append(lines[j])
+            j += 1
+        if bare_first and not explicit:
+            first_inner = next((l.strip() for l in inner if l.strip()), "")
+            if not first_inner.startswith("#"):
+                out.append(line)
+                i += 1
+                continue
+        out.extend(inner)
+        i = j + 1 if closed else len(lines)
+    return "\n".join(out)
+
+
 def repair_corrupted_latex(text: str) -> str:
     if not text:
         return ""
-    s = str(text)
+    s = unwrap_markdown_fences(str(text))
     s = re.sub(r"\x0c(rac|orall|lat|rown|box|int)", r"\\f\1", s)
     s = s.replace("\x0c", "\\f")
     s = re.sub(r"\x08(eta|egin|inom|ar|f|ig|ullet|oxed|ot|ackslash|oldsymbol)", r"\\b\1", s)
@@ -144,7 +186,6 @@ def markdown_to_html(markdown_text: str) -> str:
 
 
 def bundled_katex_dir() -> Optional[Path]:
-    """Папка с KaTeX, поставляемая вместе с приложением (assets/katex)."""
     path = Path(__file__).resolve().parent.parent / "assets" / "katex"
     return path if (path / "katex.min.js").exists() and (path / "katex.min.css").exists() else None
 
