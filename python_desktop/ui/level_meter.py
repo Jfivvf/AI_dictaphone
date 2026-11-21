@@ -1,9 +1,4 @@
-"""Индикатор уровня микрофона: бегущая лента столбиков по значениям в дБ.
-
-Новые значения появляются слева и движутся вправо.
-"""
 from collections import deque
-
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import QSizePolicy, QWidget
