@@ -729,7 +729,20 @@ class LocalLlmSummarizer(BaseSummarizer):
         return "\n\n".join(result)
 
 
+class SherpaOfflineTranscriber(BaseTranscriber):
+    """Офлайн-распознавание: sherpa-onnx + Silero VAD + разделение по спикерам (wespeaker)."""
+
+    def __init__(self, settings: Dict[str, Any]):
+        self.settings = settings
+
+    def transcribe(self, audio_path, ctx, progress_cb=None, cancel_cb=None):
+        from ml.offline import transcribe_offline
+        return transcribe_offline(audio_path, self.settings, progress_cb, cancel_cb)
+
+
 def create_transcriber(settings: Dict[str, Any]) -> BaseTranscriber:
+    if settings.get("transcriber_backend") == "sherpa_offline":
+        return SherpaOfflineTranscriber(settings)
     preset = SPEED_PRESETS.get(settings.get("whisper_speed", "balanced"), SPEED_PRESETS["balanced"])
     return FasterWhisperTranscriber(
         model_size=settings.get("whisper_model_size", "auto"),
