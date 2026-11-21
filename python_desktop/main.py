@@ -114,6 +114,7 @@ class AxAIDesktopApp(QMainWindow):
         self.expand_elapsed_sec = 0
         self.expand_timer = QTimer(self)
         self.expand_timer.timeout.connect(self._tick_expand_elapsed)
+
         self.init_ui()
         QShortcut(QKeySequence("Ctrl+M"), self).activated.connect(self.add_bookmark)
         QShortcut(QKeySequence("Ctrl+Space"), self).activated.connect(self.toggle_pause)
@@ -1389,7 +1390,7 @@ class AxAIDesktopApp(QMainWindow):
         ] if os.path.isdir(self.audio_dir) else []
         audio_mb = sum(os.path.getsize(os.path.join(self.audio_dir, f)) for f in audio_files) / (1024 * 1024)
         db_mb = os.path.getsize(self.db_manager.db_path) / (1024 * 1024) if os.path.exists(self.db_manager.db_path) else 0
-        katex = "встроен" if bundled_katex_dir() else "НЕ НАЙДЕН (формулы и PDF недоступны; выполните python tools/vendor_katex.py)"
+        katex = "встроен" if bundled_katex_dir() else "не встроен — подгружается из интернета (для работы офлайн выполните python tools/vendor_katex.py)"
         self.storage_info_lbl.setText(
             f"• Папка данных: {self.storage_path}\n"
             f"• База данных: {self.db_manager.db_path} ({db_mb:.1f} МБ)\n"
