@@ -185,7 +185,11 @@ def markdown_to_html(markdown_text: str) -> str:
     return _INLINE_TOKEN_RE.sub(inline_html, out)
 
 
+KATEX_CDN = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist"
+
+
 def bundled_katex_dir() -> Optional[Path]:
+    """Папка с KaTeX, поставляемая вместе с приложением (assets/katex)."""
     path = Path(__file__).resolve().parent.parent / "assets" / "katex"
     return path if (path / "katex.min.js").exists() and (path / "katex.min.css").exists() else None
 
@@ -275,7 +279,8 @@ _RENDER_SCRIPT = """<script src="$js_url"></script>
 document.addEventListener("DOMContentLoaded", async function () {
   window.__axError = "";
   try {
-    document.querySelectorAll("[data-latex]").forEach(function (el) {
+    if (typeof katex === "undefined") { window.__axError = "KATEX_MISSING"; }
+    else document.querySelectorAll("[data-latex]").forEach(function (el) {
       var display = el.classList.contains("math-block");
       try {
         katex.render(el.getAttribute("data-latex"), el, {
@@ -369,11 +374,14 @@ def render_lecture_html(
     body += _tasks_html(lecture.get("tasks") or []) if with_header else ""
     body += _bookmarks_html(lecture.get("bookmarks") or []) if with_header else ""
 
-    katex_css = katex_script = ""
+    # Сначала встроенный KaTeX (работает офлайн), иначе подгружаем из интернета.
     if katex_dir is not None:
         base = Path(katex_dir).resolve()
-        katex_css = f'<link rel="stylesheet" href="{(base / "katex.min.css").as_uri()}">'
-        katex_script = Template(_RENDER_SCRIPT).substitute(js_url=(base / "katex.min.js").as_uri())
+        css_url, js_url = (base / "katex.min.css").as_uri(), (base / "katex.min.js").as_uri()
+    else:
+        css_url, js_url = f"{KATEX_CDN}/katex.min.css", f"{KATEX_CDN}/katex.min.js"
+    katex_css = f'<link rel="stylesheet" href="{css_url}">'
+    katex_script = Template(_RENDER_SCRIPT).substitute(js_url=js_url)
 
     return _PAGE_TEMPLATE.safe_substitute(
         **theme,
