@@ -211,6 +211,14 @@ $katex_css
   .task-due { color: var(--muted); font-size: 0.85em; }
   .mark { margin: 0.25em 0; break-inside: avoid; }
   .mark-time { font-family: "JetBrains Mono", Consolas, monospace; color: var(--accent); margin-right: 0.6em; }
+  main { max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+  img, table { max-width: 100%; }
+  @media print {
+    html, body { height: auto !important; overflow: visible !important; }
+    pre { overflow: visible; white-space: pre-wrap; }
+    .math-block, .katex-display { overflow: visible; max-width: 100%; }
+    .katex-display > .katex { white-space: normal; }
+  }
 </style>
 </head>
 <body>
