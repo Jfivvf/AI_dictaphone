@@ -1,10 +1,7 @@
-"""Экспорт конспекта в PDF: формулы рисует KaTeX, печатает движок Chromium (QtWebEngine)."""
 from typing import Any, Dict, Optional
-
 from PySide6.QtCore import QMarginsF, QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QPageLayout, QPageSize
 from PySide6.QtWebEngineCore import QWebEnginePage
-
 from .exporters import bundled_katex_dir, render_lecture_html
 
 POLL_INTERVAL_MS = 150
@@ -13,10 +10,7 @@ SETTLE_DELAY_MS = 300
 
 
 class PdfExporter(QObject):
-    """Сигнал finished(успех, путь_или_сообщение) приходит после записи файла или при ошибке."""
-
     finished = Signal(bool, str)
-
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._page: Optional[QWebEnginePage] = None
@@ -36,24 +30,17 @@ class PdfExporter(QObject):
         if self._busy:
             return
         katex_dir = bundled_katex_dir()
-        if katex_dir is None:
-            self.finished.emit(
-                False,
-                "Не найдены файлы KaTeX (python_desktop/assets/katex). "
-                "Запустите python python_desktop/tools/vendor_katex.py.",
-            )
-            return
 
         self._busy = True
         self._save_path = save_path
         self._elapsed_ms = 0
         self._poll_pending = False
-
         document = render_lecture_html(lecture, katex_dir=katex_dir, dark_mode=False, with_header=True)
         self._page = QWebEnginePage(self)
         self._page.loadFinished.connect(self._on_loaded)
         self._page.pdfPrintingFinished.connect(self._on_printed)
-        self._page.setHtml(document, QUrl.fromLocalFile(str(katex_dir.parent) + "/"))
+        base = QUrl.fromLocalFile(str(katex_dir.parent) + "/") if katex_dir else QUrl()
+        self._page.setHtml(document, base)
 
     def _on_loaded(self, ok: bool) -> None:
         if not ok:
@@ -77,6 +64,13 @@ class PdfExporter(QObject):
         if result is None or self._page is None:
             return
         self._timer.stop()
+        if "KATEX_MISSING" in str(result):
+            self._finish(
+                False,
+                "Не удалось загрузить KaTeX для формул: нет встроенных файлов и нет интернета. "
+                "Подключитесь к интернету или выполните python tools/vendor_katex.py.",
+            )
+            return
         QTimer.singleShot(SETTLE_DELAY_MS, self._print)
 
     def _print(self) -> None:
