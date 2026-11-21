@@ -27,12 +27,12 @@ class DatabaseManager:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS student_profile (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
-                    name TEXT NOT NULL DEFAULT 'Алексей Смирнов',
+                    name TEXT NOT NULL DEFAULT 'Иванов Иван',
                     email TEXT NOT NULL DEFAULT 'student@university.ru',
-                    university TEXT NOT NULL DEFAULT 'МГУ им. М. В. Ломоносова',
-                    faculty TEXT NOT NULL DEFAULT 'Механико-математический факультет',
-                    group_name TEXT NOT NULL DEFAULT '204-Б',
-                    semester INTEGER NOT NULL DEFAULT 3,
+                    university TEXT NOT NULL DEFAULT 'НИЯУ МИФИ',
+                    faculty TEXT NOT NULL DEFAULT 'ЛаПлаз',
+                    group_name TEXT NOT NULL DEFAULT 'Б26-205',
+                    semester INTEGER NOT NULL DEFAULT 1,
                     avatar_blob BLOB DEFAULT NULL,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
@@ -45,7 +45,7 @@ class DatabaseManager:
             if "avatar_blob" not in existing_cols:
                 cur.execute("ALTER TABLE student_profile ADD COLUMN avatar_blob BLOB DEFAULT NULL")
 
-            # Список лекций
+            # Список записей
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS lectures (
                     id TEXT PRIMARY KEY,
@@ -569,6 +569,8 @@ class SettingsRepository:
        "ollama_timeout": 600,
        "silero_vad": True,
        "auto_extract_tasks": True,
+       "offline_language": "ru",
+       "diarization": True,
    }
 
     def __init__(self, db: DatabaseManager):
