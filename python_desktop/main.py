@@ -47,7 +47,6 @@ if BASE_DIR not in sys.path:
 def app_icon_pixmap(size: int = 64) -> QPixmap:
     icon_path = os.path.join(BASE_DIR, "..", "public", "logo.png")
     icon_path = os.path.abspath(icon_path)
-
     pix = QPixmap(icon_path)
     if pix.isNull():
         return draw_fixed_app_icon_pixmap(size)
@@ -114,7 +113,6 @@ class AxAIDesktopApp(QMainWindow):
         self.expand_elapsed_sec = 0
         self.expand_timer = QTimer(self)
         self.expand_timer.timeout.connect(self._tick_expand_elapsed)
-
         self.init_ui()
         QShortcut(QKeySequence("Ctrl+M"), self).activated.connect(self.add_bookmark)
         QShortcut(QKeySequence("Ctrl+Space"), self).activated.connect(self.toggle_pause)
@@ -513,7 +511,6 @@ class AxAIDesktopApp(QMainWindow):
         self.btn_cancel_ai.setVisible(True)
         self._set_record_state("busy")
         self.status_label.setText("Подготовка распознавания речи...")
-
         self.worker = TranscriptionWorker(
             audio_path=audio_path,
             title=self.input_title.text().strip() or "Учебное занятие",
@@ -575,12 +572,10 @@ class AxAIDesktopApp(QMainWindow):
             "ai_context": self.input_record_context.toPlainText().strip(),
         }
         unpack_raw_json_lecture_if_needed(new_lecture)
-
         saved = self.lecture_repo.upsert_lecture(new_lecture)
         self.revision_repo.add_revision_if_new(lec_id, saved["text"], "Исходная версия")
         self.bookmark_repo.replace_for_lecture(lec_id, self.pending_bookmarks)
         self.pending_bookmarks = []
-
         self.lectures = self.lecture_repo.get_all_lectures()
         self.refresh_history_list()
         self.open_lecture_viewer(saved)
@@ -654,14 +649,12 @@ class AxAIDesktopApp(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(28, 20, 28, 20)
         layout.setSpacing(10)
-
         top_bar = QHBoxLayout()
-        back_btn = QPushButton("Назад к лекциям")
+        back_btn = QPushButton("Назад к записям")
         back_btn.clicked.connect(lambda: self.navigate_to("history"))
         self._set_icon(back_btn, "back", "text")
         top_bar.addWidget(back_btn)
         top_bar.addStretch()
-
         self.revert_prev_btn = QPushButton("Вернуть предыдущую версию")
         self.revert_prev_btn.setObjectName("revertBtn")
         self.revert_prev_btn.clicked.connect(self.handle_revert_previous_version)
@@ -671,37 +664,32 @@ class AxAIDesktopApp(QMainWindow):
         self.history_revs_btn = QPushButton("История версий (0)")
         self.history_revs_btn.clicked.connect(self.open_revisions_dialog)
         top_bar.addWidget(self.history_revs_btn)
-
         self.context_toggle_btn = QPushButton("Контекст")
         self.context_toggle_btn.clicked.connect(self.toggle_viewer_context_box)
         top_bar.addWidget(self.context_toggle_btn)
-
         self.expand_ai_btn = QPushButton("Сделать подробнее")
         self.expand_ai_btn.setObjectName("expandAiBtn")
         self.expand_ai_btn.clicked.connect(self.handle_expand_lecture_ai)
         top_bar.addWidget(self.expand_ai_btn)
-
         self.btn_export_pdf = QPushButton("Скачать PDF")
         self.btn_export_pdf.clicked.connect(self.export_current_pdf)
         self._set_icon(self.btn_export_pdf, "printer", "text")
         top_bar.addWidget(self.btn_export_pdf)
-
         export_md_btn = QPushButton(".MD")
         export_md_btn.clicked.connect(self.export_current_markdown)
         top_bar.addWidget(export_md_btn)
-
         export_tex_btn = QPushButton(".TEX")
         export_tex_btn.clicked.connect(self.export_current_latex)
         top_bar.addWidget(export_tex_btn)
 
         delete_lec_btn = QPushButton()
         self._set_icon(delete_lec_btn, "trash", "text")
-        delete_lec_btn.setToolTip("Удалить эту лекцию")
+        delete_lec_btn.setToolTip("Удалить запись")
         delete_lec_btn.clicked.connect(self.delete_current_lecture)
         top_bar.addWidget(delete_lec_btn)
         layout.addLayout(top_bar)
 
-        self.viewer_title = QLabel("Название лекции")
+        self.viewer_title = QLabel("Название записи")
         self.viewer_title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(self.viewer_title)
 
@@ -834,7 +822,6 @@ class AxAIDesktopApp(QMainWindow):
         unpack_raw_json_lecture_if_needed(lec)
         self.current_lecture = lec
         self.viewer_title.setText(lec.get("title", "Без названия"))
-
         clean_text = repair_corrupted_latex(lec.get("text", ""))
         self.current_lecture["text"] = clean_text
         self._set_viewer_meta(lec, clean_text)
@@ -1256,16 +1243,16 @@ class AxAIDesktopApp(QMainWindow):
 
     def open_add_task_dialog(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить задачу или дедлайн")
+        dlg.setWindowTitle("Добавить задачу")
         dlg.setFixedWidth(420)
         vbox = QVBoxLayout(dlg)
         vbox.setContentsMargins(20, 20, 20, 20)
         vbox.setSpacing(10)
 
         inp_task = QLineEdit()
-        inp_task.setPlaceholderText("Что нужно сделать (напр.: Доказать критерий Поста)")
+        inp_task.setPlaceholderText("Что нужно сделать")
         inp_deadline = QLineEdit()
-        inp_deadline.setPlaceholderText("Срок (напр.: К следующему семинару)")
+        inp_deadline.setPlaceholderText("Срок")
         prio_cb = QComboBox()
         prio_cb.addItem("Высокий", "high")
         prio_cb.addItem("Обычный", "medium")
@@ -1273,7 +1260,7 @@ class AxAIDesktopApp(QMainWindow):
 
         vbox.addWidget(QLabel("Задача:"))
         vbox.addWidget(inp_task)
-        vbox.addWidget(QLabel("Срок / Дедлайн:"))
+        vbox.addWidget(QLabel("Срок:"))
         vbox.addWidget(inp_deadline)
         vbox.addWidget(QLabel("Приоритет:"))
         vbox.addWidget(prio_cb)
@@ -1454,7 +1441,7 @@ class AxAIDesktopApp(QMainWindow):
     def clear_audio_files(self):
         reply = QMessageBox.question(
             self, "Подтверждение",
-            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы сохранены в бд.",
+            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы сохранены в базе данных.",
         )
         if reply != QMessageBox.Yes:
             return
@@ -1501,6 +1488,24 @@ class AxAIDesktopApp(QMainWindow):
         hw_vbox.addWidget(hw_btn, alignment=Qt.AlignLeft)
         layout.addWidget(hw_card)
 
+        layout.addWidget(QLabel("Режим распознавания речи:"))
+        self.cb_asr_mode = QComboBox()
+        self.cb_asr_mode.addItem("Whisper", "local_whisper")
+        self.cb_asr_mode.addItem("Sherpa", "sherpa_offline")
+        self._select_data(self.cb_asr_mode, self.app_settings.get("transcriber_backend", "local_whisper"))
+        layout.addWidget(self.cb_asr_mode)
+
+        layout.addWidget(QLabel("Язык распознавания:"))
+        self.cb_offline_lang = QComboBox()
+        self.cb_offline_lang.addItem("Русский", "ru")
+        self.cb_offline_lang.addItem("English", "en")
+        self._select_data(self.cb_offline_lang, self.app_settings.get("offline_language", "ru"))
+        layout.addWidget(self.cb_offline_lang)
+
+        self.diar_check = QCheckBox("Разделять речь по спикерам")
+        self.diar_check.setChecked(bool(self.app_settings.get("diarization", True)))
+        layout.addWidget(self.diar_check)
+
         layout.addWidget(QLabel("Модель Whisper для распознавания речи:"))
         self.cb_whisper_size = QComboBox()
         self.cb_whisper_size.addItem("Автоподбор под железо", "auto")
@@ -1518,7 +1523,7 @@ class AxAIDesktopApp(QMainWindow):
         self._select_data(self.cb_speed, self.app_settings.get("whisper_speed", "balanced"))
         layout.addWidget(self.cb_speed)
 
-        layout.addWidget(QLabel("Подробность первичного конспекта:"))
+        layout.addWidget(QLabel("Подробность исходного конспекта:"))
         self.cb_detail = QComboBox()
         self.cb_detail.addItem("Быстрый и сжатый", "fast")
         self.cb_detail.addItem("Подробный", "full")
@@ -1588,6 +1593,9 @@ class AxAIDesktopApp(QMainWindow):
     def save_ai_settings(self):
         self.app_settings = {
             **self.app_settings,
+            "transcriber_backend": self.cb_asr_mode.currentData(),
+            "offline_language": self.cb_offline_lang.currentData(),
+            "diarization": self.diar_check.isChecked(),
             "whisper_model_size": self.cb_whisper_size.currentData(),
             "whisper_speed": self.cb_speed.currentData(),
             "summary_detail": self.cb_detail.currentData(),
