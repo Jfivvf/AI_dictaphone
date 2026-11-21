@@ -133,7 +133,10 @@ class AxAIDesktopApp(QMainWindow):
                 pass
 
     def get_user_avatar_pixmap(self, size: int = 36):
-        return pixmap_from_png_bytes(self.profile_repo.get_avatar_bytes(), size=size)
+        data = self.profile_repo.get_avatar_bytes()
+        if data:
+            return pixmap_from_png_bytes(data, size=size)
+        return app_icon_pixmap(size)
 
     def choose_user_avatar(self):
         path, _ = QFileDialog.getOpenFileName(
