@@ -1,48 +1,70 @@
-from collections import deque
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPalette
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 FLOOR_DB = -60.0
-HISTORY = 80
+SEGMENTS = 40
+GAP = 2.0
+FALL_PER_TICK = 0.10
+PEAK_HOLD_TICKS = 8
+PEAK_FALL_PER_TICK = 0.03
+
+_GREEN = QColor("#22c55e")
+_AMBER = QColor("#fbbf24")
+_RED = QColor("#ef4444")
 
 
 class LevelMeter(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._values = deque([FLOOR_DB] * HISTORY, maxlen=HISTORY)
-        self.setMinimumHeight(40)
-        self.setMaximumHeight(56)
+        self._level = 0.0
+        self._peak = 0.0
+        self._hold = 0
+        self.setFixedHeight(18)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
     def reset(self) -> None:
-        self._values = deque([FLOOR_DB] * HISTORY, maxlen=HISTORY)
+        self._level = 0.0
+        self._peak = 0.0
+        self._hold = 0
         self.update()
 
     def push(self, db: float) -> None:
-        self._values.append(max(FLOOR_DB, min(0.0, float(db))))
+        ratio = 0.0 if db <= -79 else max(0.0, min(1.0, (float(db) - FLOOR_DB) / -FLOOR_DB))
+        self._level = ratio if ratio >= self._level else max(ratio, self._level - FALL_PER_TICK)
+        if ratio >= self._peak:
+            self._peak = ratio
+            self._hold = PEAK_HOLD_TICKS
+        elif self._hold > 0:
+            self._hold -= 1
+        else:
+            self._peak = max(ratio, self._peak - PEAK_FALL_PER_TICK)
         self.update()
+
+    @staticmethod
+    def _zone_color(frac: float) -> QColor:
+        if frac < 0.65:
+            return _GREEN
+        if frac < 0.85:
+            return _AMBER
+        return _RED
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        w, h = self.width(), self.height()
-        slot = w / HISTORY
-        bar_w = max(1.5, slot * 0.6)
-        base = self.palette().color(QPalette.Highlight)
-        for i, db in enumerate(self._values):
-            ratio = (db - FLOOR_DB) / -FLOOR_DB
-            bar_h = max(3.0, ratio * h)
-            if db > -6:
-                color = QColor("#ef4444")
-            elif db > -18:
-                color = QColor("#fbbf24")
+        painter.setPen(Qt.NoPen)
+        w, h = float(self.width()), float(self.height())
+        seg_w = (w - GAP * (SEGMENTS - 1)) / SEGMENTS
+        off = QColor(self.palette().color(QPalette.Mid))
+        off.setAlpha(90)
+        peak_idx = min(SEGMENTS - 1, int(self._peak * SEGMENTS)) if self._peak > 0 else -1
+        for i in range(SEGMENTS):
+            frac = (i + 0.5) / SEGMENTS
+            if frac <= self._level or (i == peak_idx and self._peak > self._level):
+                color = self._zone_color(frac)
             else:
-                color = QColor(base)
-            if ratio <= 0.02:
-                color.setAlpha(80)
+                color = off
             painter.setBrush(color)
-            painter.setPen(Qt.NoPen)
-            x = i * slot + (slot - bar_w) / 2
-            painter.drawRoundedRect(QRectF(x, (h - bar_h) / 2, bar_w, bar_h), bar_w / 2, bar_w / 2)
+            x = i * (seg_w + GAP)
+            painter.drawRoundedRect(QRectF(x, 0, seg_w, h), 2, 2)
         painter.end()
