@@ -27,12 +27,12 @@ class DatabaseManager:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS student_profile (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
-                    name TEXT NOT NULL DEFAULT 'Иванов Иван',
+                    name TEXT NOT NULL DEFAULT 'Алексей Смирнов',
                     email TEXT NOT NULL DEFAULT 'student@university.ru',
-                    university TEXT NOT NULL DEFAULT 'НИЯУ МИФИ',
-                    faculty TEXT NOT NULL DEFAULT 'ЛаПлаз',
-                    group_name TEXT NOT NULL DEFAULT 'Б26-205',
-                    semester INTEGER NOT NULL DEFAULT 1,
+                    university TEXT NOT NULL DEFAULT 'МГУ им. М. В. Ломоносова',
+                    faculty TEXT NOT NULL DEFAULT 'Механико-математический факультет',
+                    group_name TEXT NOT NULL DEFAULT '204-Б',
+                    semester INTEGER NOT NULL DEFAULT 3,
                     avatar_blob BLOB DEFAULT NULL,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
@@ -45,7 +45,7 @@ class DatabaseManager:
             if "avatar_blob" not in existing_cols:
                 cur.execute("ALTER TABLE student_profile ADD COLUMN avatar_blob BLOB DEFAULT NULL")
 
-            # Список записей
+            # Список лекций
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS lectures (
                     id TEXT PRIMARY KEY,
@@ -82,7 +82,7 @@ class DatabaseManager:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
-                    lecture_id TEXT NOT NULL,
+                    lecture_id TEXT,
                     task TEXT NOT NULL,
                     deadline TEXT NOT NULL,
                     priority TEXT DEFAULT 'medium',
@@ -90,6 +90,25 @@ class DatabaseManager:
                     FOREIGN KEY (lecture_id) REFERENCES lectures(id) ON DELETE CASCADE
                 )
             """)
+            task_cols = cur.execute("PRAGMA table_info(tasks)").fetchall()
+            if any(c["name"] == "lecture_id" and c["notnull"] for c in task_cols):
+                cur.execute("ALTER TABLE tasks RENAME TO tasks_old")
+                cur.execute("""
+                    CREATE TABLE tasks (
+                        id TEXT PRIMARY KEY,
+                        lecture_id TEXT,
+                        task TEXT NOT NULL,
+                        deadline TEXT NOT NULL,
+                        priority TEXT DEFAULT 'medium',
+                        completed INTEGER DEFAULT 0,
+                        FOREIGN KEY (lecture_id) REFERENCES lectures(id) ON DELETE CASCADE
+                    )
+                """)
+                cur.execute(
+                    "INSERT INTO tasks (id, lecture_id, task, deadline, priority, completed) "
+                    "SELECT id, lecture_id, task, deadline, priority, completed FROM tasks_old"
+                )
+                cur.execute("DROP TABLE tasks_old")
 
             # Таблица истории версий конспекта
             cur.execute("""
@@ -214,7 +233,25 @@ class TaskRepository:
                 for r in rows
             ]
 
-    def upsert_task(self, lecture_id: str, task: Dict[str, Any]) -> None:
+    def get_standalone_tasks(self) -> List[Dict[str, Any]]:
+        """Задачи, не привязанные ни к одной лекции."""
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, task, deadline, priority, completed FROM tasks WHERE lecture_id IS NULL ORDER BY rowid ASC"
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "lecture_id": None,
+                    "task": r["task"],
+                    "deadline": r["deadline"],
+                    "priority": r["priority"],
+                    "completed": bool(r["completed"]),
+                }
+                for r in rows
+            ]
+
+    def upsert_task(self, lecture_id: Optional[str], task: Dict[str, Any]) -> None:
         task_id = task.get("id") or f"task-{int(datetime.now().timestamp() * 1000)}"
         with self.db.get_connection() as conn:
             conn.execute(
