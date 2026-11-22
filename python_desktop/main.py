@@ -1576,7 +1576,13 @@ class AxAIDesktopApp(QMainWindow):
         layout.addWidget(save_btn)
 
         layout.addStretch()
-        return page
+        # Страница длиннее окна: без прокрутки Qt сжимает элементы (обрезает карточки и кнопки).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
 
     @staticmethod
     def _select_data(combo: QComboBox, value):
