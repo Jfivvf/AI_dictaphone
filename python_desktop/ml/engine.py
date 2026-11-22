@@ -6,7 +6,6 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
 from audio_decode import decode_audio_16k
 from paths import MODELS_DIR
 from export.exporters import repair_corrupted_latex
@@ -18,13 +17,10 @@ CancelCallback = Callable[[], bool]
 class AiUnavailableError(RuntimeError):
     pass
 
-
 class NotEnoughTextError(RuntimeError):
     pass
 
-
 MIN_TRANSCRIPT_CHARS = 300
-
 
 class CancelledError(Exception):
     pass
@@ -36,7 +32,6 @@ class LectureContext:
     title: str = ""
     lecturer: str = ""
     notes: str = ""
-
     def for_prompt(self) -> str:
         lines: List[str] = []
         if self.subject.strip():
@@ -209,6 +204,8 @@ def check_ollama(url: str, timeout: float = 1.5) -> Tuple[bool, List[str]]:
         return False, []
 
 
+_HW_CACHE: Optional[Dict[str, Any]] = None  # железо не меняется за время работы: определяем один раз
+
 _PREFERRED_FAMILIES = ("qwen2.5", "qwen3", "llama3", "gemma", "mistral", "deepseek")
 
 
@@ -226,6 +223,13 @@ def pick_installed_model(wanted: str, installed: List[str]) -> Optional[str]:
 class HardwareInspector:
     @staticmethod
     def hardware() -> Dict[str, Any]:
+        global _HW_CACHE
+        if _HW_CACHE is None:
+            _HW_CACHE = HardwareInspector._detect()
+        return dict(_HW_CACHE)
+
+    @staticmethod
+    def _detect() -> Dict[str, Any]:
         cpu_cores = os.cpu_count() or 4
         physical_cores = max(1, cpu_cores // 2)
         ram_gb = 8.0
