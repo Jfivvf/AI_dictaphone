@@ -1,15 +1,10 @@
-"""
-Запуск:
-    cd python_desktop
-    python main.py
-"""
 import os
 import re
 import shutil
 import sys
 import json
 from datetime import datetime
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
@@ -47,7 +42,6 @@ if BASE_DIR not in sys.path:
 def app_icon_pixmap(size: int = 64) -> QPixmap:
     icon_path = os.path.join(BASE_DIR, "..", "public", "logo.png")
     icon_path = os.path.abspath(icon_path)
-
     pix = QPixmap(icon_path)
     if pix.isNull():
         return draw_fixed_app_icon_pixmap(size)
@@ -73,6 +67,22 @@ NAV_ICONS = {
     "record": "mic", "history": "book", "deadlines": "calendar",
     "storage": "drive", "settings": "settings", "profile": "user",
 }
+
+
+NO_LECTURE_FILTER = "__no_lecture__"
+
+
+class _CallWorker(QThread):
+    done = Signal(object)
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self._fn())
+        except Exception as err:
+            self.done.emit(err)
 
 
 class AxAIDesktopApp(QMainWindow):
@@ -1169,6 +1179,8 @@ class AxAIDesktopApp(QMainWindow):
         self.deadline_subject.blockSignals(True)
         self.deadline_subject.clear()
         self.deadline_subject.addItem("Все предметы", "")
+        if self.task_repo.get_standalone_tasks():
+            self.deadline_subject.addItem("Без лекции", NO_LECTURE_FILTER)
         for subject in subjects:
             self.deadline_subject.addItem(subject, subject)
         idx = self.deadline_subject.findData(selected)
@@ -1191,13 +1203,16 @@ class AxAIDesktopApp(QMainWindow):
         weights = {"high": 3, "medium": 2, "low": 1}
 
         everything = [(lec, t) for lec in self.lectures for t in lec.get("tasks", [])]
+        everything += [(None, t) for t in self.task_repo.get_standalone_tasks()]
         pending_total = sum(1 for _, t in everything if not t.get("completed"))
         done_total = len(everything) - pending_total
         self.deadline_counter.setText(f"Активных: {pending_total}  ·  Выполнено: {done_total}")
 
         items = [
             (lec, t) for lec, t in everything
-            if (not subject or lec.get("subject") == subject)
+            if (not subject
+                or (lec is None and subject == NO_LECTURE_FILTER)
+                or (lec is not None and lec.get("subject") == subject))
             and (status == "all" or (status == "pending") == (not t.get("completed")))
         ]
         items.sort(key=lambda p: (p[1].get("completed", False), -weights.get(p[1].get("priority", "medium"), 2)))
@@ -1226,7 +1241,8 @@ class AxAIDesktopApp(QMainWindow):
             task_lbl.setWordWrap(True)
             task_lbl.setObjectName("taskTitleDone" if task.get("completed") else "taskTitle")
             info_col.addWidget(task_lbl)
-            meta_lbl = QLabel(f"{lec.get('subject', '')}  ·  Срок: {task.get('deadline', 'По графику')}")
+            where = lec.get("subject", "") if lec else "Без лекции"
+            meta_lbl = QLabel(f"{where}  ·  Срок: {task.get('deadline', 'По графику')}")
             meta_lbl.setObjectName("deadlineText")
             info_col.addWidget(meta_lbl)
             row.addLayout(info_col, stretch=1)
@@ -1241,9 +1257,10 @@ class AxAIDesktopApp(QMainWindow):
             )
             row.addWidget(prio_combo)
 
-            open_btn = QPushButton("Открыть лекцию →")
-            open_btn.clicked.connect(lambda checked=False, l_ref=lec: self.open_lecture_viewer(l_ref))
-            row.addWidget(open_btn)
+            if lec is not None:
+                open_btn = QPushButton("Открыть лекцию →")
+                open_btn.clicked.connect(lambda checked=False, l_ref=lec: self.open_lecture_viewer(l_ref))
+                row.addWidget(open_btn)
             self.tasks_vbox.addWidget(card)
 
         self.tasks_vbox.addStretch()
@@ -1275,12 +1292,20 @@ class AxAIDesktopApp(QMainWindow):
         prio_cb.addItem("Обычный", "medium")
         prio_cb.addItem("Низкий", "low")
 
+        lecture_cb = QComboBox()
+        lecture_cb.addItem("Без лекции (просто задача)", None)
+        for lec in self.lecture_repo.get_all_lectures():
+            label = f"{lec.get('subject', '')} — {lec.get('title', '')} ({lec.get('date', '')})"
+            lecture_cb.addItem(label, lec["id"])
+
         vbox.addWidget(QLabel("Задача:"))
         vbox.addWidget(inp_task)
         vbox.addWidget(QLabel("Срок / Дедлайн:"))
         vbox.addWidget(inp_deadline)
         vbox.addWidget(QLabel("Приоритет:"))
         vbox.addWidget(prio_cb)
+        vbox.addWidget(QLabel("Привязать к лекции:"))
+        vbox.addWidget(lecture_cb)
 
         btns = QHBoxLayout()
         cancel_b = QPushButton("Отмена")
@@ -1292,21 +1317,7 @@ class AxAIDesktopApp(QMainWindow):
             text = inp_task.text().strip()
             if not text:
                 return
-            self.lectures = self.lecture_repo.get_all_lectures()
-            if not self.lectures:
-                base = self.lecture_repo.upsert_lecture({
-                    "id": f"lec-{int(datetime.now().timestamp())}",
-                    "title": "Общие учебные задачи",
-                    "subject": "Общее",
-                    "lecturer": "Самостоятельная работа",
-                    "date": datetime.now().strftime("%d.%m.%Y"),
-                    "duration_min": 30,
-                    "text": "## Общие задачи семестра",
-                    "tasks": [],
-                })
-                target_id = base["id"]
-            else:
-                target_id = self.lectures[0]["id"]
+            target_id = lecture_cb.currentData()  # None -> задача без лекции
 
             self.task_repo.upsert_task(target_id, {
                 "id": f"custom-{int(datetime.now().timestamp() * 1000)}",
@@ -1600,10 +1611,19 @@ class AxAIDesktopApp(QMainWindow):
             self.latex_preview.render_lecture(self.current_lecture)
 
     def refresh_hardware_info(self):
+        if getattr(self, "_hw_worker", None) is not None and self._hw_worker.isRunning():
+            return
         self.hardware_checked = True
         self.hw_lbl.setText("Проверка...")
-        QApplication.processEvents()
-        hw = HardwareInspector.inspect(self.inp_ollama_url.text().strip() or "http://localhost:11434")
+        url = self.inp_ollama_url.text().strip() or "http://localhost:11434"
+        self._hw_worker = _CallWorker(lambda: HardwareInspector.inspect(url), self)
+        self._hw_worker.done.connect(self._show_hardware_info)
+        self._hw_worker.start()
+
+    def _show_hardware_info(self, hw):
+        if not isinstance(hw, dict):
+            self.hw_lbl.setText("Не удалось определить характеристики ПК.")
+            return
         if hw["ollama_online"]:
             ollama = f"работает, модели: {', '.join(hw['ollama_models'][:5]) or 'не установлены'}"
         else:
@@ -1774,9 +1794,15 @@ class AxAIDesktopApp(QMainWindow):
     def check_models_on_start(self):
         if self.app_settings.get("setup_prompt_dismissed"):
             return
-        status = setup_status(self.app_settings)
-        if not status["ready"]:
-            self.offer_model_setup(status=status, allow_dismiss=True)
+        settings = dict(self.app_settings)
+        self._start_check = _CallWorker(lambda: setup_status(settings), self)
+
+        def on_status(result):
+            if isinstance(result, dict) and not result["ready"]:
+                self.offer_model_setup(status=result, allow_dismiss=True)
+
+        self._start_check.done.connect(on_status)
+        self._start_check.start()
 
     def offer_model_setup(self, status=None, allow_dismiss=False):
         if self.setup_worker is not None and self.setup_worker.isRunning():
