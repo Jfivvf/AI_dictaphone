@@ -90,6 +90,7 @@ class DatabaseManager:
                     FOREIGN KEY (lecture_id) REFERENCES lectures(id) ON DELETE CASCADE
                 )
             """)
+            # Миграция: раньше lecture_id был обязательным, а задача без лекции хранилась нельзя.
             task_cols = cur.execute("PRAGMA table_info(tasks)").fetchall()
             if any(c["name"] == "lecture_id" and c["notnull"] for c in task_cols):
                 cur.execute("ALTER TABLE tasks RENAME TO tasks_old")
@@ -600,7 +601,7 @@ class SettingsRepository:
        "summarizer_backend": "auto",
        "allow_cloud_fallback": False,
        "whisper_model_size": "auto",
-       "ollama_model": "qwen2.5:7b",
+       "ollama_model": "qwen2.5:3b",
        "ollama_url": "http://localhost:11434",
        "ollama_num_ctx": 16384,
        "ollama_timeout": 600,
