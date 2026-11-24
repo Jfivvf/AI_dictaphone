@@ -13,12 +13,12 @@ from export.exporters import repair_corrupted_latex
 ProgressCallback = Callable[[int, str], None]
 CancelCallback = Callable[[], bool]
 
-
 class AiUnavailableError(RuntimeError):
     pass
 
 class NotEnoughTextError(RuntimeError):
     pass
+
 
 MIN_TRANSCRIPT_CHARS = 300
 
@@ -69,7 +69,6 @@ def extract_terms(notes: str, limit: int = 25) -> List[str]:
 
 
 def build_asr_prompts(ctx: LectureContext) -> Tuple[str, str]:
-    """Возвращает (initial_prompt, hotwords) для faster-whisper."""
     head = ". ".join(p.strip() for p in (ctx.subject, ctx.title) if p.strip())
     notes = re.sub(r"\s+", " ", ctx.notes or "").strip()
     initial = " ".join(p for p in (head + "." if head else "", notes) if p)[:600]
@@ -758,7 +757,7 @@ def create_transcriber(settings: Dict[str, Any]) -> BaseTranscriber:
 
 def create_summarizer(settings: Dict[str, Any]) -> BaseSummarizer:
     url = settings.get("ollama_url", "http://localhost:11434")
-    wanted = settings.get("ollama_model", "qwen2.5:7b")
+    wanted = settings.get("ollama_model", "qwen2.5:3b")
     online, installed = check_ollama(url)
     if not online:
         raise AiUnavailableError(f"Сервер Ollama не запущен на {url}. Запустите Ollama и повторите.")
