@@ -38,10 +38,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-
 def app_icon_pixmap(size: int = 64) -> QPixmap:
     icon_path = os.path.join(BASE_DIR, "..", "public", "logo.png")
     icon_path = os.path.abspath(icon_path)
+
     pix = QPixmap(icon_path)
     if pix.isNull():
         return draw_fixed_app_icon_pixmap(size)
@@ -68,9 +68,7 @@ NAV_ICONS = {
     "storage": "drive", "settings": "settings", "profile": "user",
 }
 
-
 NO_LECTURE_FILTER = "__no_lecture__"
-
 
 class _CallWorker(QThread):
     done = Signal(object)
@@ -81,7 +79,7 @@ class _CallWorker(QThread):
     def run(self):
         try:
             self.done.emit(self._fn())
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001
             self.done.emit(err)
 
 
@@ -124,7 +122,6 @@ class AxAIDesktopApp(QMainWindow):
         self.expand_elapsed_sec = 0
         self.expand_timer = QTimer(self)
         self.expand_timer.timeout.connect(self._tick_expand_elapsed)
-
         self.init_ui()
         QShortcut(QKeySequence("Ctrl+M"), self).activated.connect(self.add_bookmark)
         QShortcut(QKeySequence("Ctrl+Space"), self).activated.connect(self.toggle_pause)
@@ -171,7 +168,6 @@ class AxAIDesktopApp(QMainWindow):
         root_vbox = QVBoxLayout(root_widget)
         root_vbox.setContentsMargins(0, 0, 0, 0)
         root_vbox.setSpacing(0)
-
         header = QFrame()
         header.setObjectName("headerBar")
         header.setFixedHeight(56)
@@ -184,31 +180,26 @@ class AxAIDesktopApp(QMainWindow):
         #brand_icon.setPixmap(draw_fixed_app_icon_pixmap(32))
         brand_icon.setFixedSize(34, 34)
         header_layout.addWidget(brand_icon)
-
         brand_label = QLabel("AxAI")
         brand_label.setFont(QFont("Arial", 14, QFont.Bold))
         brand_label.setObjectName("brand")
         header_layout.addWidget(brand_label)
         header_layout.addStretch()
-
         self.header_avatar_btn = QPushButton()
         self.header_avatar_btn.setIconSize(QSize(24, 24))
         self.header_avatar_btn.clicked.connect(lambda: self.navigate_to("profile"))
         header_layout.addWidget(self.header_avatar_btn)
         root_vbox.addWidget(header)
-
         body_widget = QWidget()
         main_layout = QHBoxLayout(body_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(225)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(12, 16, 12, 16)
         sidebar_layout.setSpacing(6)
-
         self.nav_buttons = {}
         for key, label in [
             ("record", "Запись"),
@@ -226,14 +217,12 @@ class AxAIDesktopApp(QMainWindow):
             sidebar_layout.addWidget(btn)
             self.nav_buttons[key] = btn
         sidebar_layout.addStretch()
-
         import_pdf_btn = QPushButton("Импорт PDF / .MD")
         import_pdf_btn.setObjectName("primaryBtn")
         import_pdf_btn.clicked.connect(self.handle_import_document)
         self._set_icon(import_pdf_btn, "upload", "white")
         sidebar_layout.addWidget(import_pdf_btn)
         main_layout.addWidget(sidebar)
-
         self.pages = QStackedWidget()
         self.page_record = self.create_record_page()
         self.page_history = self.create_history_page()
@@ -247,11 +236,9 @@ class AxAIDesktopApp(QMainWindow):
             self.page_storage, self.page_settings, self.page_profile,
         ):
             self.pages.addWidget(page)
-
         main_layout.addWidget(self.pages)
         root_vbox.addWidget(body_widget)
         self.setCentralWidget(root_widget)
-
         self.refresh_profile_widgets()
         self.navigate_to("record")
 
@@ -298,14 +285,12 @@ class AxAIDesktopApp(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(14)
-
         title = QLabel("Запись")
         title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(title)
         subtitle = QLabel("Запись с микрофона в реальном времени или загрузка аудиофайла")
         subtitle.setObjectName("muted")
         layout.addWidget(subtitle)
-
         info_card = QFrame()
         info_card.setObjectName("card")
         grid = QGridLayout(info_card)
@@ -347,13 +332,11 @@ class AxAIDesktopApp(QMainWindow):
         self.input_record_context.setMaximumHeight(80)
         ctx_layout.addWidget(self.input_record_context)
         layout.addWidget(ctx_card)
-
         rec_card = QFrame()
         rec_card.setObjectName("card")
         rec_layout = QVBoxLayout(rec_card)
         rec_layout.setContentsMargins(18, 16, 18, 16)
         rec_layout.setSpacing(12)
-
         status_row = QHBoxLayout()
         self.rec_dot = QLabel()
         self.rec_dot.setObjectName("recDot")
@@ -377,20 +360,17 @@ class AxAIDesktopApp(QMainWindow):
         self.btn_record.setObjectName("recordBtn")
         self.btn_record.clicked.connect(self.start_recording)
         self._set_icon(self.btn_record, "mic", "white")
-
         self.btn_pause = QPushButton("Пауза")
         self.btn_pause.clicked.connect(self.toggle_pause)
         self._set_icon(self.btn_pause, "pause", "text")
-
         self.btn_bookmark = QPushButton("Метка (0)")
         self.btn_bookmark.clicked.connect(self.add_bookmark)
         self._set_icon(self.btn_bookmark, "bookmark", "text")
-
         self.btn_finish = QPushButton("Завершить и сохранить")
         self.btn_finish.setObjectName("primaryBtn")
         self.btn_finish.clicked.connect(self.finish_recording)
         self._set_icon(self.btn_finish, "stop", "white")
-
+        
         self.btn_upload_audio = QPushButton("Загрузить аудиофайл")
         self.btn_upload_audio.clicked.connect(self.handle_upload_audio)
         self._set_icon(self.btn_upload_audio, "upload", "text")
@@ -405,11 +385,9 @@ class AxAIDesktopApp(QMainWindow):
         btn_row.addWidget(self.btn_upload_audio)
         rec_layout.addLayout(btn_row)
         layout.addWidget(rec_card)
-
         self.record_progress = QProgressBar()
         self.record_progress.setVisible(False)
         layout.addWidget(self.record_progress)
-
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setObjectName("accentText")
@@ -423,7 +401,6 @@ class AxAIDesktopApp(QMainWindow):
         cancel_row.addWidget(self.btn_cancel_ai)
         cancel_row.addStretch()
         layout.addLayout(cancel_row)
-
         layout.addStretch()
         self._set_record_state("idle")
         return page
@@ -510,7 +487,7 @@ class AxAIDesktopApp(QMainWindow):
 
     def handle_upload_audio(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Аудиозапись лекции", "", "Аудио (*.wav *.mp3 *.m4a *.ogg *.webm)"
+            self, "Аудиозапись", "", "Аудио (*.wav *.mp3 *.m4a *.ogg *.webm)"
         )
         if path:
             target = os.path.join(
@@ -574,8 +551,8 @@ class AxAIDesktopApp(QMainWindow):
         lec_id = f"lec-{int(datetime.now().timestamp())}"
         new_lecture = {
             "id": lec_id,
-            "title": self.input_title.text().strip() or "Конспект лекции",
-            "subject": self.input_subject.text().strip() or "Учебное занятие",
+            "title": self.input_title.text().strip() or "Конспект",
+            "subject": self.input_subject.text().strip() or "Занятие",
             "lecturer": self.input_lecturer.text().strip() or "Преподаватель",
             "date": datetime.now().strftime("%d.%m.%Y"),
             "duration_min": duration_min,
@@ -616,13 +593,11 @@ class AxAIDesktopApp(QMainWindow):
         title.setFont(QFont("Arial", 16, QFont.Bold))
         header.addWidget(title)
         header.addStretch()
-
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск по конспектам, формулам и предметам...")
         self.search_input.setFixedWidth(420)
         self.search_input.textChanged.connect(self.refresh_history_list)
         header.addWidget(self.search_input)
-
         import_btn = QPushButton("Импорт PDF / .MD")
         import_btn.setObjectName("primaryBtn")
         import_btn.clicked.connect(self.handle_import_document)
@@ -633,7 +608,6 @@ class AxAIDesktopApp(QMainWindow):
         self.history_list = QListWidget()
         self.history_list.itemClicked.connect(self.on_lecture_clicked)
         layout.addWidget(self.history_list)
-
         self.refresh_history_list()
         return page
 
@@ -650,7 +624,7 @@ class AxAIDesktopApp(QMainWindow):
             revs_count = len(lec.get("revisions", []))
             rev_badge = f"  ·  Версий: {revs_count}" if revs_count > 0 else ""
             item = QListWidgetItem(
-                f"{lec.get('title', 'Лекция')}  ·  {lec.get('subject', '')}\n"
+                f"{lec.get('title', 'Запись')}  ·  {lec.get('subject', '')}\n"
                 f"{lec.get('date', '')}  ·  {lec.get('lecturer', '')}  ·  "
                 f"Задач: {len(lec.get('tasks', []))}{rev_badge}"
             )
@@ -669,18 +643,16 @@ class AxAIDesktopApp(QMainWindow):
         layout.setSpacing(10)
 
         top_bar = QHBoxLayout()
-        back_btn = QPushButton("Назад к лекциям")
+        back_btn = QPushButton("Назад к записям")
         back_btn.clicked.connect(lambda: self.navigate_to("history"))
         self._set_icon(back_btn, "back", "text")
         top_bar.addWidget(back_btn)
         top_bar.addStretch()
-
         self.revert_prev_btn = QPushButton("Вернуть предыдущую версию")
         self.revert_prev_btn.setObjectName("revertBtn")
         self.revert_prev_btn.clicked.connect(self.handle_revert_previous_version)
         self.revert_prev_btn.setVisible(False)
         top_bar.addWidget(self.revert_prev_btn)
-
         self.history_revs_btn = QPushButton("История версий (0)")
         self.history_revs_btn.clicked.connect(self.open_revisions_dialog)
         top_bar.addWidget(self.history_revs_btn)
@@ -688,12 +660,10 @@ class AxAIDesktopApp(QMainWindow):
         self.context_toggle_btn = QPushButton("Контекст")
         self.context_toggle_btn.clicked.connect(self.toggle_viewer_context_box)
         top_bar.addWidget(self.context_toggle_btn)
-
         self.expand_ai_btn = QPushButton("Сделать подробнее")
         self.expand_ai_btn.setObjectName("expandAiBtn")
         self.expand_ai_btn.clicked.connect(self.handle_expand_lecture_ai)
         top_bar.addWidget(self.expand_ai_btn)
-
         self.btn_export_pdf = QPushButton("Скачать PDF")
         self.btn_export_pdf.clicked.connect(self.export_current_pdf)
         self._set_icon(self.btn_export_pdf, "printer", "text")
@@ -702,33 +672,29 @@ class AxAIDesktopApp(QMainWindow):
         export_md_btn = QPushButton(".MD")
         export_md_btn.clicked.connect(self.export_current_markdown)
         top_bar.addWidget(export_md_btn)
-
         export_tex_btn = QPushButton(".TEX")
         export_tex_btn.clicked.connect(self.export_current_latex)
         top_bar.addWidget(export_tex_btn)
-
         delete_lec_btn = QPushButton()
         self._set_icon(delete_lec_btn, "trash", "text")
-        delete_lec_btn.setToolTip("Удалить эту лекцию")
+        delete_lec_btn.setToolTip("Удалить эту запись")
         delete_lec_btn.clicked.connect(self.delete_current_lecture)
         top_bar.addWidget(delete_lec_btn)
         layout.addLayout(top_bar)
 
-        self.viewer_title = QLabel("Название лекции")
+        self.viewer_title = QLabel("Название")
         self.viewer_title.setFont(QFont("Arial", 16, QFont.Bold))
         layout.addWidget(self.viewer_title)
 
         self.viewer_meta = QLabel("")
         self.viewer_meta.setObjectName("muted")
         layout.addWidget(self.viewer_meta)
-
         self.expand_progress_card = QFrame()
         self.expand_progress_card.setObjectName("progressCard")
         self.expand_progress_card.setVisible(False)
         p_vbox = QVBoxLayout(self.expand_progress_card)
         p_vbox.setContentsMargins(16, 12, 16, 12)
         p_vbox.setSpacing(6)
-
         p_top = QHBoxLayout()
         self.expand_stage_lbl = QLabel("")
         self.expand_stage_lbl.setObjectName("stageText")
@@ -848,14 +814,12 @@ class AxAIDesktopApp(QMainWindow):
         unpack_raw_json_lecture_if_needed(lec)
         self.current_lecture = lec
         self.viewer_title.setText(lec.get("title", "Без названия"))
-
         clean_text = repair_corrupted_latex(lec.get("text", ""))
         self.current_lecture["text"] = clean_text
         self._set_viewer_meta(lec, clean_text)
         self.text_editor.setPlainText(clean_text)
         self.viewer_context_input.setPlainText(lec.get("ai_context", ""))
         self.transcript_viewer.setPlainText(self._build_transcript_text(lec))
-
         self.latex_preview.render_lecture(self.current_lecture)
         self.viewer_stack.setCurrentIndex(0)
         self.save_edits_btn.setVisible(False)
@@ -927,7 +891,6 @@ class AxAIDesktopApp(QMainWindow):
         info.setWordWrap(True)
         info.setObjectName("muted")
         vbox.addWidget(info)
-
         list_w = QListWidget()
         current_trimmed = (self.current_lecture.get("text") or "").strip()
         for rev in reversed(revs):
@@ -939,7 +902,6 @@ class AxAIDesktopApp(QMainWindow):
             item.setData(Qt.UserRole, rev)
             list_w.addItem(item)
         vbox.addWidget(list_w, stretch=1)
-
         btn_row = QHBoxLayout()
         close_b = QPushButton("Закрыть")
         close_b.clicked.connect(dlg.reject)
@@ -998,7 +960,7 @@ class AxAIDesktopApp(QMainWindow):
         self.current_lecture["ai_context"] = extra_ctx
 
         self.expand_worker = ExpandLectureWorker(
-            title=self.current_lecture.get("title", "Лекция"),
+            title=self.current_lecture.get("title", "Запись"),
             subject=self.current_lecture.get("subject", "Дисциплина"),
             current_markdown=self.text_editor.toPlainText(),
             raw_transcript=self.current_lecture.get("raw_transcript", ""),
@@ -1024,7 +986,7 @@ class AxAIDesktopApp(QMainWindow):
         self.expand_timer.stop()
         self.expand_progress_card.setVisible(False)
         self.expand_ai_btn.setEnabled(True)
-        self.expand_ai_btn.setText("Сделать подробнее (ИИ)")
+        self.expand_ai_btn.setText("Сделать подробнее")
 
     def on_expand_worker_progress(self, pct: int, stage_msg: str):
         self.expand_progress_bar.setValue(max(self.expand_progress_bar.value(), pct))
@@ -1043,10 +1005,10 @@ class AxAIDesktopApp(QMainWindow):
         if previous_md:
             self.revision_repo.add_revision_if_new(
                 lec_id, previous_md,
-                "Исходная (лаконичная) версия" if not existing else f"Версия до расширения #{len(existing) + 1}",
+                "Исходная версия" if not existing else f"Версия до расширения #{len(existing) + 1}",
             )
         updated = self.revision_repo.get_revisions(lec_id)
-        self.revision_repo.add_revision_if_new(lec_id, clean_expanded, f"Подробная версия (ИИ) #{len(updated) + 1}")
+        self.revision_repo.add_revision_if_new(lec_id, clean_expanded, f"Подробная версия #{len(updated) + 1}")
 
         self.current_lecture["text"] = clean_expanded
         self.text_editor.setPlainText(clean_expanded)
@@ -1057,13 +1019,13 @@ class AxAIDesktopApp(QMainWindow):
 
     def on_expand_error(self, err: str):
         self._reset_expand_ui()
-        QMessageBox.warning(self, "Ошибка ИИ", f"Не удалось расширить конспект: {err}")
+        QMessageBox.warning(self, "Ошибка", f"Не удалось расширить конспект: {err}")
 
     def delete_current_lecture(self):
         if not self.current_lecture:
             return
         reply = QMessageBox.question(
-            self, "Удаление лекции", f"Удалить лекцию «{self.current_lecture.get('title', '')}» из базы данных?"
+            self, "Удаление записи", f"Удалить запись «{self.current_lecture.get('title', '')}» из базы данных?"
         )
         if reply == QMessageBox.Yes:
             self.lecture_repo.delete_lecture(self.current_lecture["id"])
@@ -1079,13 +1041,13 @@ class AxAIDesktopApp(QMainWindow):
         return lec
 
     def _safe_name(self) -> str:
-        return re.sub(r'[\\/:*?"<>|\s]+', "_", self.current_lecture.get("title", "Лекция"))
+        return re.sub(r'[\\/:*?"<>|\s]+', "_", self.current_lecture.get("title", "Запись"))
 
     def export_current_markdown(self):
         if not self.current_lecture:
             return
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить Markdown (.md)", f"{self._safe_name()}_конспект.md", "Markdown (*.md)"
+            self, "Сохранить Markdown", f"{self._safe_name()}_конспект.md", "Markdown (*.md)"
         )
         if save_path:
             export_lecture_to_markdown(self._export_payload(), save_path)
@@ -1095,7 +1057,7 @@ class AxAIDesktopApp(QMainWindow):
         if not self.current_lecture:
             return
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить LaTeX (.tex)", f"{self._safe_name()}_конспект.tex", "LaTeX (*.tex)"
+            self, "Сохранить LaTeX", f"{self._safe_name()}_конспект.tex", "LaTeX (*.tex)"
         )
         if save_path:
             export_lecture_to_latex(self._export_payload(), save_path)
@@ -1105,7 +1067,7 @@ class AxAIDesktopApp(QMainWindow):
         if not self.current_lecture or self.latex_preview.pdf_exporter.busy:
             return
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить PDF (.pdf)", f"{self._safe_name()}_конспект.pdf", "PDF (*.pdf)"
+            self, "Сохранить PDF", f"{self._safe_name()}_конспект.pdf", "PDF (*.pdf)"
         )
         if not save_path:
             return
@@ -1180,7 +1142,7 @@ class AxAIDesktopApp(QMainWindow):
         self.deadline_subject.clear()
         self.deadline_subject.addItem("Все предметы", "")
         if self.task_repo.get_standalone_tasks():
-            self.deadline_subject.addItem("Без лекции", NO_LECTURE_FILTER)
+            self.deadline_subject.addItem("Без записи", NO_LECTURE_FILTER)
         for subject in subjects:
             self.deadline_subject.addItem(subject, subject)
         idx = self.deadline_subject.findData(selected)
@@ -1218,7 +1180,7 @@ class AxAIDesktopApp(QMainWindow):
         items.sort(key=lambda p: (p[1].get("completed", False), -weights.get(p[1].get("priority", "medium"), 2)))
 
         if not items:
-            empty = QLabel("Нет задач по выбранным фильтрам. Запишите лекцию, импортируйте PDF или добавьте задачу.")
+            empty = QLabel("Нет задач по выбранным фильтрам. Создайте запись, импортируйте PDF или добавьте задачу.")
             empty.setObjectName("emptyState")
             self.tasks_vbox.addWidget(empty)
             self.tasks_vbox.addStretch()
@@ -1241,7 +1203,7 @@ class AxAIDesktopApp(QMainWindow):
             task_lbl.setWordWrap(True)
             task_lbl.setObjectName("taskTitleDone" if task.get("completed") else "taskTitle")
             info_col.addWidget(task_lbl)
-            where = lec.get("subject", "") if lec else "Без лекции"
+            where = lec.get("subject", "") if lec else "Без записи"
             meta_lbl = QLabel(f"{where}  ·  Срок: {task.get('deadline', 'По графику')}")
             meta_lbl.setObjectName("deadlineText")
             info_col.addWidget(meta_lbl)
@@ -1258,7 +1220,7 @@ class AxAIDesktopApp(QMainWindow):
             row.addWidget(prio_combo)
 
             if lec is not None:
-                open_btn = QPushButton("Открыть лекцию →")
+                open_btn = QPushButton("Открыть запись →")
                 open_btn.clicked.connect(lambda checked=False, l_ref=lec: self.open_lecture_viewer(l_ref))
                 row.addWidget(open_btn)
             self.tasks_vbox.addWidget(card)
@@ -1277,36 +1239,35 @@ class AxAIDesktopApp(QMainWindow):
 
     def open_add_task_dialog(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Добавить задачу или дедлайн")
+        dlg.setWindowTitle("Добавить задачу")
         dlg.setFixedWidth(420)
         vbox = QVBoxLayout(dlg)
         vbox.setContentsMargins(20, 20, 20, 20)
         vbox.setSpacing(10)
 
         inp_task = QLineEdit()
-        inp_task.setPlaceholderText("Что нужно сделать (напр.: Доказать критерий Поста)")
+        inp_task.setPlaceholderText("Что нужно сделать?")
         inp_deadline = QLineEdit()
-        inp_deadline.setPlaceholderText("Срок (напр.: К следующему семинару)")
+        inp_deadline.setPlaceholderText("Срок")
         prio_cb = QComboBox()
         prio_cb.addItem("Высокий", "high")
         prio_cb.addItem("Обычный", "medium")
         prio_cb.addItem("Низкий", "low")
 
         lecture_cb = QComboBox()
-        lecture_cb.addItem("Без лекции (просто задача)", None)
+        lecture_cb.addItem("Без записи", None)
         for lec in self.lecture_repo.get_all_lectures():
             label = f"{lec.get('subject', '')} — {lec.get('title', '')} ({lec.get('date', '')})"
             lecture_cb.addItem(label, lec["id"])
 
         vbox.addWidget(QLabel("Задача:"))
         vbox.addWidget(inp_task)
-        vbox.addWidget(QLabel("Срок / Дедлайн:"))
+        vbox.addWidget(QLabel("Срок:"))
         vbox.addWidget(inp_deadline)
         vbox.addWidget(QLabel("Приоритет:"))
         vbox.addWidget(prio_cb)
-        vbox.addWidget(QLabel("Привязать к лекции:"))
+        vbox.addWidget(QLabel("Привязать к записи:"))
         vbox.addWidget(lecture_cb)
-
         btns = QHBoxLayout()
         cancel_b = QPushButton("Отмена")
         cancel_b.clicked.connect(dlg.reject)
@@ -1317,7 +1278,7 @@ class AxAIDesktopApp(QMainWindow):
             text = inp_task.text().strip()
             if not text:
                 return
-            target_id = lecture_cb.currentData()  # None -> задача без лекции
+            target_id = lecture_cb.currentData()
 
             self.task_repo.upsert_task(target_id, {
                 "id": f"custom-{int(datetime.now().timestamp() * 1000)}",
@@ -1365,14 +1326,14 @@ class AxAIDesktopApp(QMainWindow):
         b_title.setObjectName("cardTitle")
         b_vbox.addWidget(b_title)
         b_hint = QLabel(
-            "В один .zip попадают все лекции, задачи, формулы, история версий, закладки, профиль, "
-            "аватарка и настройки. Сами аудиофайлы записей по умолчанию не включаются (они тяжёлые), "
+            "В один .zip попадают все записи, задачи, формулы, история версий, закладки, профиль, "
+            "аватарка и настройки. Сами аудиофайлы записей по умолчанию не включаются, "
             "их можно добавить галочкой ниже. Перед восстановлением текущая база сохраняется в папку backups_auto."
         )
         b_hint.setWordWrap(True)
         b_hint.setObjectName("muted")
         b_vbox.addWidget(b_hint)
-        self.chk_backup_audio = QCheckBox("Добавить в копию аудиозаписи лекций (файл станет намного больше)")
+        self.chk_backup_audio = QCheckBox("Добавить в копию аудиозаписи")
         b_vbox.addWidget(self.chk_backup_audio)
         b_row = QHBoxLayout()
         make_btn = QPushButton("Создать резервную копию…")
@@ -1401,11 +1362,11 @@ class AxAIDesktopApp(QMainWindow):
         ] if os.path.isdir(self.audio_dir) else []
         audio_mb = sum(os.path.getsize(os.path.join(self.audio_dir, f)) for f in audio_files) / (1024 * 1024)
         db_mb = os.path.getsize(self.db_manager.db_path) / (1024 * 1024) if os.path.exists(self.db_manager.db_path) else 0
-        katex = "встроен" if bundled_katex_dir() else "не встроен — подгружается из интернета (для работы офлайн выполните python tools/vendor_katex.py)"
+        katex = "встроен" if bundled_katex_dir() else "не встроен."
         self.storage_info_lbl.setText(
             f"• Папка данных: {self.storage_path}\n"
             f"• База данных: {self.db_manager.db_path} ({db_mb:.1f} МБ)\n"
-            f"• Лекций: {len(self.lecture_repo.get_all_lectures())}\n"
+            f"• Записей: {len(self.lecture_repo.get_all_lectures())}\n"
             f"• Аудиозаписи: {len(audio_files)} файлов, {audio_mb:.1f} МБ ({self.audio_dir})\n"
             f"• KaTeX для формул в PDF: {katex}"
         )
@@ -1425,7 +1386,7 @@ class AxAIDesktopApp(QMainWindow):
             return
         QMessageBox.information(
             self, "Резервная копия",
-            f"Копия сохранена:\n{path}\n\nЛекций: {manifest['lectures']}, аудиофайлов: {manifest['audio_files']}",
+            f"Копия сохранена:\n{path}\n\nЗаписей: {manifest['lectures']}, аудиофайлов: {manifest['audio_files']}",
         )
 
     def restore_backup_dialog(self):
@@ -1439,7 +1400,7 @@ class AxAIDesktopApp(QMainWindow):
             return
         reply = QMessageBox.question(
             self, "Восстановление",
-            f"Копия от {manifest.get('created_at', '?')}: лекций {manifest.get('lectures', '?')}.\n\n"
+            f"Копия от {manifest.get('created_at', '?')}: записей {manifest.get('lectures', '?')}.\n\n"
             "Текущие данные будут заменены. Перед этим текущая база сохранится в папку backups_auto. Продолжить?",
         )
         if reply != QMessageBox.Yes:
@@ -1470,7 +1431,7 @@ class AxAIDesktopApp(QMainWindow):
     def clear_audio_files(self):
         reply = QMessageBox.question(
             self, "Подтверждение",
-            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы сохранены в бд.",
+            "Удалить аудиозаписи с диска? Конспекты, задачи и стенограммы сохранены в базе данных.",
         )
         if reply != QMessageBox.Yes:
             return
@@ -1519,8 +1480,8 @@ class AxAIDesktopApp(QMainWindow):
 
         layout.addWidget(QLabel("Режим распознавания речи:"))
         self.cb_asr_mode = QComboBox()
-        self.cb_asr_mode.addItem("Whisper (модели скачиваются один раз)", "local_whisper")
-        self.cb_asr_mode.addItem("Офлайн-пакет sherpa (без интернета, со спикерами)", "sherpa_offline")
+        self.cb_asr_mode.addItem("Whisper", "local_whisper")
+        self.cb_asr_mode.addItem("Sherpa (Без интернета)", "sherpa_offline")
         self._select_data(self.cb_asr_mode, self.app_settings.get("transcriber_backend", "local_whisper"))
         layout.addWidget(self.cb_asr_mode)
 
@@ -1539,7 +1500,7 @@ class AxAIDesktopApp(QMainWindow):
         self.cb_whisper_size = QComboBox()
         self.cb_whisper_size.addItem("Автоподбор под железо", "auto")
         self.cb_whisper_size.addItem("large-v3-turbo (максимальная точность)", "large-v3-turbo")
-        self.cb_whisper_size.addItem("small (для компактных ноутбуков)", "small")
+        self.cb_whisper_size.addItem("small (для устройств послабее)", "small")
         self.cb_whisper_size.addItem("base (самая лёгкая)", "base")
         self._select_data(self.cb_whisper_size, self.app_settings.get("whisper_model_size", "auto"))
         layout.addWidget(self.cb_whisper_size)
@@ -1565,13 +1526,22 @@ class AxAIDesktopApp(QMainWindow):
 
         layout.addWidget(QLabel("Конспекты, формулы и дедлайны:"))
         ollama_row = QHBoxLayout()
-        self.inp_ollama_model = QLineEdit(self.app_settings.get("ollama_model", "qwen2.5:7b"))
+        self.inp_ollama_model = QComboBox()
+        self.inp_ollama_model.setEditable(True)
+        self.inp_ollama_model.addItems(["qwen2.5:3b", "qwen2.5:7b"])
+        self.inp_ollama_model.setCurrentText(self.app_settings.get("ollama_model", "qwen2.5:3b"))
         self.inp_ollama_url = QLineEdit(self.app_settings.get("ollama_url", "http://localhost:11434"))
         ollama_row.addWidget(QLabel("Модель:"))
         ollama_row.addWidget(self.inp_ollama_model)
         ollama_row.addWidget(QLabel("Адрес:"))
         ollama_row.addWidget(self.inp_ollama_url)
         layout.addLayout(ollama_row)
+        llm_hint = QLabel(
+            "qwen2.5:3b входит в офлайн-пакет: быстрее и работает без интернета (нужна установленная Ollama). "
+            "qwen2.5:7b скачивается из интернета (около 4,7 ГБ): конспект точнее, но на процессоре заметно медленнее."
+        )
+        llm_hint.setWordWrap(True)
+        layout.addWidget(llm_hint)
 
         self.noise_check = QCheckBox("Фильтрация тишины и шума аудитории")
         self.noise_check.setChecked(bool(self.app_settings.get("silero_vad", True)))
@@ -1587,7 +1557,6 @@ class AxAIDesktopApp(QMainWindow):
         layout.addWidget(save_btn)
 
         layout.addStretch()
-        # Страница длиннее окна: без прокрутки Qt сжимает элементы (обрезает карточки и кнопки).
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -1643,7 +1612,7 @@ class AxAIDesktopApp(QMainWindow):
             "whisper_model_size": self.cb_whisper_size.currentData(),
             "whisper_speed": self.cb_speed.currentData(),
             "summary_detail": self.cb_detail.currentData(),
-            "ollama_model": self.inp_ollama_model.text().strip() or "qwen2.5:7b",
+            "ollama_model": self.inp_ollama_model.currentText().strip() or "qwen2.5:3b",
             "ollama_url": self.inp_ollama_url.text().strip() or "http://localhost:11434",
             "silero_vad": self.noise_check.isChecked(),
             "auto_extract_tasks": self.tasks_check.isChecked(),
