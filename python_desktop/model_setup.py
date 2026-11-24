@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import urllib.request
 import zipfile
@@ -23,7 +24,17 @@ RELEASE_URL = os.environ.get(
 
 # Примерный размер загрузки, МБ
 WHISPER_SIZES_MB = {"tiny": 75, "base": 145, "small": 480, "medium": 1500, "large-v3-turbo": 1600, "large-v3": 3100}
-LLM_SIZES_MB = {"qwen2.5:3b": 1900, "qwen2.5:7b": 4700}
+LLM_SIZES_MB = {"qwen2.5:3b": 2100, "qwen2.5:7b": 4700}
+
+# Языковая модель, которая входит в офлайн-пакет: файл GGUF лежит в релизе и импортируется в Ollama.
+BUNDLED_LLM = "qwen2.5:3b"
+BUNDLED_LLM_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
+_CHATML_TEMPLATE = (
+    "{{ if .System }}<|im_start|>system\n{{ .System }}<|im_end|>\n{{ end }}"
+    "{{ if .Prompt }}<|im_start|>user\n{{ .Prompt }}<|im_end|>\n{{ end }}"
+    "<|im_start|>assistant\n{{ .Response }}<|im_end|>"
+)
+_STOP_TOKENS = ("<|im_start|>", "<|im_end|>")
 OFFLINE_SIZES_MB = {"sherpa-ru": 233, "sherpa-en": 55, VAD_FILE: 3, SPEAKER_FILE: 26}
 ProgressCb = Callable[[int, str], None]
 CancelCb = Callable[[], bool]
@@ -49,7 +60,6 @@ def _targets(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _offline_assets(missing: List[str]) -> List[str]:
-    """Какие файлы релиза нужно скачать, чтобы закрыть недостающее."""
     assets: List[str] = []
     for rel in missing:
         if "/" in rel:
@@ -72,8 +82,8 @@ def setup_status(settings: Dict[str, Any]) -> Dict[str, Any]:
             label = {
                 "sherpa-ru": "Офлайн-модель распознавания русской речи",
                 "sherpa-en": "Офлайн-модель распознавания английской речи",
-                VAD_FILE: "Офлайн-модель поиска речи (Silero VAD)",
-                SPEAKER_FILE: "Офлайн-модель разделения по спикерам (wespeaker)",
+                VAD_FILE: "Офлайн-модель поиска речи",
+                SPEAKER_FILE: "Офлайн-модель разделения по спикерам",
             }.get(asset, asset)
             needs.append(label)
             need_mb += OFFLINE_SIZES_MB.get(asset, 100)
@@ -83,12 +93,18 @@ def setup_status(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     online, installed = check_ollama(t["url"])
     if not online:
-        needs.append("Ollama не запущена.")
+        needs.append("Ollama не запущена: установите её с ollama.com и запустите (нужна для конспектов)")
     elif not pick_installed_model(t["llm"], installed):
-        needs.append(f"Языковая модель Ollama «{t['llm']}»")
+        source = " (из офлайн-пакета)" if _from_release(settings, t["llm"]) else " (скачивается из интернета)"
+        needs.append(f"Языковая модель Ollama «{t['llm']}»{source}")
         need_mb += LLM_SIZES_MB.get(t["llm"], 4700)
 
     return {"ready": not needs, "needs": needs, "need_mb": need_mb}
+
+
+def _from_release(settings: Dict[str, Any], llm: str) -> bool:
+    """Модель берём из релиза (без интернета-реестра Ollama), если это 3B и включён офлайн-режим."""
+    return is_offline_mode(settings) and llm == BUNDLED_LLM
 
 
 def _check_cancel(cancel_cb: Optional[CancelCb]) -> None:
@@ -96,14 +112,12 @@ def _check_cancel(cancel_cb: Optional[CancelCb]) -> None:
         raise CancelledError()
 
 
-#Whisper, Ollama
-
 def _download_whisper(name: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
     try:
         from faster_whisper.utils import download_model
     except ImportError as err:
-        raise SetupError("Не установлен пакет faster-whisper.") from err
-    progress_cb(5, f"Скачивание Whisper «{name}»...")
+        raise SetupError("Не установлен пакет faster-whisper. Выполните: pip install -r requirements.txt") from err
+    progress_cb(5, f"Скачивание Whisper «{name}» (может занять несколько минут)...")
     _check_cancel(cancel_cb)
     try:
         download_model(name, cache_dir=MODELS_DIR)
@@ -139,7 +153,7 @@ def _pull_ollama(url: str, model: str, progress_cb: ProgressCb, cancel_cb: Cance
         raise SetupError(f"Не удалось скачать модель {model} через Ollama: {err}") from err
 
 
-#Офлайн
+# Офлайн
 
 def _sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -150,6 +164,7 @@ def _sha256(path: str) -> str:
 
 
 def _fetch_sums() -> Dict[str, str]:
+    """Читает SHA256SUMS из релиза. Ключи — путь из файла без ведущих «./» и «models/»."""
     try:
         with urllib.request.urlopen(f"{RELEASE_URL}/SHA256SUMS", timeout=30) as resp:
             text = resp.read().decode("utf-8", errors="replace")
@@ -195,7 +210,6 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
     sums = _fetch_sums()
     installed: List[str] = []
     os.makedirs(MODELS_DIR, exist_ok=True)
-
     weights = {a: OFFLINE_SIZES_MB.get(a, 50) for a in assets}
     total_w = sum(weights.values()) or 1
     cursor = 3
@@ -205,7 +219,6 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
         cursor = hi
         is_zip = not asset.endswith(".onnx")
         file_name = f"{asset}.zip" if is_zip else asset
-
         tmp_dir = tempfile.mkdtemp(prefix="axai_dl_", dir=MODELS_DIR)
         try:
             part = os.path.join(tmp_dir, file_name)
@@ -251,6 +264,86 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
     return installed
 
 
+def _import_gguf(url: str, model: str, gguf_path: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
+    progress_cb(90, "Импорт модели в Ollama...")
+    errors: List[str] = []
+    exe = shutil.which("ollama")
+    if exe:
+        tmp = tempfile.mkdtemp(prefix="axai_modelfile_", dir=MODELS_DIR)
+        try:
+            modelfile = os.path.join(tmp, "Modelfile")
+            with open(modelfile, "w", encoding="utf-8") as f:
+                f.write(f"FROM {gguf_path}\n")
+                f.write(f'TEMPLATE """{_CHATML_TEMPLATE}"""\n')
+                for stop in _STOP_TOKENS:
+                    f.write(f'PARAMETER stop "{stop}"\n')
+            env = dict(os.environ)
+            if url.rstrip("/") != "http://localhost:11434":
+                env["OLLAMA_HOST"] = url.rstrip("/")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.run(
+                [exe, "create", model, "-f", modelfile],
+                capture_output=True, text=True, timeout=1800, env=env, creationflags=flags,
+            )
+            if proc.returncode == 0:
+                return
+            errors.append((proc.stderr or proc.stdout or "").strip()[-300:])
+        except Exception as err:
+            errors.append(str(err))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    _check_cancel(cancel_cb)
+
+    try:
+        digest = _sha256(gguf_path)
+        size = os.path.getsize(gguf_path)
+        with open(gguf_path, "rb") as blob:
+            req = urllib.request.Request(
+                f"{url.rstrip('/')}/api/blobs/sha256:{digest}", data=blob, method="POST",
+                headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"},
+            )
+            urllib.request.urlopen(req, timeout=1800).read()
+        body = json.dumps({
+            "model": model, "files": {os.path.basename(gguf_path): f"sha256:{digest}"},
+            "template": _CHATML_TEMPLATE, "parameters": {"stop": list(_STOP_TOKENS)}, "stream": True,
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/api/create", data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=1800) as resp:
+            for raw in resp:
+                _check_cancel(cancel_cb)
+                if raw.strip():
+                    chunk = json.loads(raw.decode("utf-8"))
+                    if chunk.get("error"):
+                        raise SetupError(str(chunk["error"]))
+        return
+    except CancelledError:
+        raise
+    except Exception as err:
+        errors.append(str(err))
+    raise SetupError(f"Не удалось импортировать модель {model} в Ollama: " + "; ".join(e for e in errors if e))
+
+
+def _install_bundled_llm(url: str, model: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
+    try:
+        sums = _fetch_sums()
+    except SetupError:
+        sums = {}
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="axai_dl_", dir=MODELS_DIR)
+    try:
+        part = os.path.join(tmp, BUNDLED_LLM_FILE)
+        _download_file(f"{RELEASE_URL}/{BUNDLED_LLM_FILE}", part, BUNDLED_LLM_FILE, 3, 85, progress_cb, cancel_cb)
+        progress_cb(86, "Проверка файла модели...")
+        expected = sums.get(BUNDLED_LLM_FILE)
+        if expected and _sha256(part) != expected:
+            raise SetupError("Контрольная сумма файла модели не совпала — файл повреждён. Повторите установку.")
+        _import_gguf(url, model, part, progress_cb, cancel_cb)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def run_setup(settings: Dict[str, Any], progress_cb: ProgressCb, cancel_cb: CancelCb) -> str:
     t = _targets(settings)
@@ -269,9 +362,12 @@ def run_setup(settings: Dict[str, Any], progress_cb: ProgressCb, cancel_cb: Canc
     _check_cancel(cancel_cb)
     online, installed = check_ollama(t["url"])
     if not online:
-        notes.append("Ollama не запущена.")
+        notes.append("Ollama не запущена — установите её с ollama.com, запустите и повторите установку (нужна для конспектов).")
     elif not pick_installed_model(t["llm"], installed):
-        _pull_ollama(t["url"], t["llm"], progress_cb, cancel_cb)
+        if _from_release(settings, t["llm"]):
+            _install_bundled_llm(t["url"], t["llm"], progress_cb, cancel_cb)
+        else:
+            _pull_ollama(t["url"], t["llm"], progress_cb, cancel_cb)
         done.append(f"модель Ollama «{t['llm']}»")
 
     progress_cb(100, "Готово.")
