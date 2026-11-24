@@ -1,10 +1,9 @@
 import os
 from typing import Any, Dict, List
-from task_detection import extract_tasks
+from task_detection import extract_structured_tasks, extract_tasks, merge_tasks
 
 class DocumentError(Exception):
     pass
-
 
 def extract_raw_text(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
@@ -50,4 +49,5 @@ def keyword_tasks_and_formulas(raw_text: str, file_name: str) -> Dict[str, List[
                 "latex": clean.strip("$ "),
                 "context": "Извлечено из документа",
             })
-    return {"tasks": extract_tasks(raw_text), "formulas": formulas[:12]}
+    tasks = merge_tasks(extract_structured_tasks(raw_text), extract_tasks(raw_text))
+    return {"tasks": tasks, "formulas": formulas[:12]}
