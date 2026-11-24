@@ -13,7 +13,7 @@ from ml.engine import (
 )
 from model_setup import SetupError, run_setup
 from pdf_importer import DocumentError, keyword_tasks_and_formulas, read_document
-from task_detection import extract_tasks
+from task_detection import extract_structured_tasks, extract_tasks, merge_tasks
 
 
 class TranscriptionWorker(QThread):
@@ -207,6 +207,8 @@ class ImportDocumentWorker(QThread):
                 fallback = keyword_tasks_and_formulas(raw_text, file_name)
                 tasks, formulas = fallback["tasks"], fallback["formulas"]
 
+            if summary_md and not warning:
+                tasks = merge_tasks(extract_structured_tasks(raw_text), tasks)
             self.finished.emit({
                 "title": doc["title"],
                 "subject": "Импортированные материалы",
@@ -215,7 +217,7 @@ class ImportDocumentWorker(QThread):
                 "duration_min": 60,
                 "text": summary_md,
                 "raw_transcript": raw_text,
-                "tasks": tasks[:10],
+                "tasks": tasks[:20],
                 "formulas": formulas,
                 "warning": warning,
             })
