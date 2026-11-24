@@ -64,7 +64,7 @@ def extract_tasks(text: str, limit: int = 10) -> List[Dict[str, Any]]:
         if skip_next:
             skip_next = False
             continue
-        if not 12 <= len(sentence) <= 400:
+        if not 12 <= len(sentence) <= 400 or sentence.lstrip().startswith("#") or len(sentence.split()) < 3:
             continue
 
         deadline = _find_deadline(sentence)
@@ -94,3 +94,105 @@ def extract_tasks(text: str, limit: int = 10) -> List[Dict[str, Any]]:
         if len(tasks) >= limit:
             break
     return tasks
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_TASK_HEAD_RE = re.compile(r"задани|домашн|\bд/з\b|\bдз\b|упражнени|практическ\w+\s+работ", re.IGNORECASE)
+_ITEM_RE = re.compile(r"^\s{0,3}(?:\d+[.)]|[-*+])\s+(.*)$")
+_OPTIONAL_RE = re.compile(r"по\s+желанию|необязательн|дополнительн", re.IGNORECASE)
+
+
+def _plain(text: str) -> str:
+    text = re.sub(r"[*_`]+", "", text)
+    text = re.sub(r"[^\w\s.,:;!?()\[\]{}<>/\\+\-–—=«»\"'$^|%№…→←↔]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def extract_structured_tasks(text: str, limit: int = 20) -> List[Dict[str, Any]]:
+    lines = (text or "").splitlines()
+    heads: List[Any] = []
+    in_fence = False
+    fence_rows = set()
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            fence_rows.add(i)
+            continue
+        if in_fence:
+            fence_rows.add(i)
+            continue
+        m = _HEADING_RE.match(line)
+        if m:
+            heads.append((i, len(m.group(1)), m.group(2)))
+
+    tasks: List[Dict[str, Any]] = []
+    for n, (start, level, title) in enumerate(heads):
+        if not _TASK_HEAD_RE.search(title):
+            continue
+        end = len(lines)
+        for nxt_start, nxt_level, _t in heads[n + 1:]:
+            if nxt_level <= level:
+                end = nxt_start
+                break
+        body = [
+            ln for j, ln in enumerate(lines[start + 1:end], start + 1)
+            if not re.fullmatch(r"\s*(?:-{3,}|\*{3,}|_{3,})\s*", ln) and not ln.strip().startswith("```")
+        ]
+        head_deadline = _find_deadline(_plain(title))
+
+        items: List[List[str]] = []
+        after_blank = False
+        for ln in body:
+            if not ln.strip():
+                after_blank = True
+                continue
+            m = _ITEM_RE.match(ln)
+            if m:
+                items.append([m.group(1)])
+            elif items and items[-1][-1] != "" and after_blank and not ln.startswith("  "):
+                break  # абзац после списка («Совет: …») к заданиям не относится
+            elif items and ln.strip():
+                items[-1].append(ln)
+            elif not items and ln.strip():
+                items.append([ln])
+                items[-1].append("")  # метка: абзац без списка, дальше дописываем в него же
+            after_blank = False
+        if items and all(it[-1] == "" for it in items):
+            # абзацы без списка: склеиваем в одну задачу
+            items = [[ln for it in items for ln in it if ln]]
+        else:
+            items = [[ln for ln in it if ln] for it in items]
+
+        for it in items:
+            task_text = _plain(" ".join(it))
+            if len(task_text) < 12:
+                continue
+            tasks.append({
+                "id": f"task-md-{len(tasks)}",
+                "task": task_text,
+                "deadline": _find_deadline(task_text) or head_deadline or DEFAULT_DEADLINE,
+                "completed": False,
+                "priority": "low" if _OPTIONAL_RE.search(task_text) or _OPTIONAL_RE.search(title)
+                else ("high" if _URGENT_RE.search(task_text) else "medium"),
+            })
+            if len(tasks) >= limit:
+                return tasks
+    return tasks
+
+
+def _words(text: str) -> set:
+    return {w.lower() for w in re.findall(r"\w{4,}", text)}
+
+
+def merge_tasks(primary: List[Dict[str, Any]], extra: List[Dict[str, Any]], limit: int = 20) -> List[Dict[str, Any]]:
+    result = list(primary)
+    known = [_words(t.get("task", "")) for t in result]
+    for task in extra:
+        words = _words(task.get("task", ""))
+        if not words:
+            continue
+        if any(k and len(words & k) / min(len(words), len(k)) >= 0.5 for k in known):
+            continue
+        result.append(task)
+        known.append(words)
+    return result[:limit]
