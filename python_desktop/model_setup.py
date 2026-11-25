@@ -3,16 +3,17 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
 from typing import Any, Callable, Dict, List, Optional
+
 from ml.engine import (
     CancelledError,
     HardwareInspector,
     check_ollama,
     find_local_whisper,
-    pick_installed_model,
 )
 from ml.offline import ASR_FILES, SPEAKER_FILE, VAD_FILE, offline_missing
 from paths import MODELS_DIR
@@ -36,14 +37,18 @@ _CHATML_TEMPLATE = (
 )
 _STOP_TOKENS = ("<|im_start|>", "<|im_end|>")
 OFFLINE_SIZES_MB = {"sherpa-ru": 233, "sherpa-en": 55, VAD_FILE: 3, SPEAKER_FILE: 26}
+
 ProgressCb = Callable[[int, str], None]
 CancelCb = Callable[[], bool]
+
 
 class SetupError(RuntimeError):
     pass
 
+
 def is_offline_mode(settings: Dict[str, Any]) -> bool:
     return settings.get("transcriber_backend") == "sherpa_offline"
+
 
 def _targets(settings: Dict[str, Any]) -> Dict[str, Any]:
     hw = HardwareInspector.hardware()
@@ -60,6 +65,7 @@ def _targets(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _offline_assets(missing: List[str]) -> List[str]:
+    """Какие файлы релиза нужно скачать, чтобы закрыть недостающее."""
     assets: List[str] = []
     for rel in missing:
         if "/" in rel:
@@ -80,10 +86,10 @@ def setup_status(settings: Dict[str, Any]) -> Dict[str, Any]:
         missing = offline_missing(t["lang"], t["diarization"])
         for asset in _offline_assets(missing):
             label = {
-                "sherpa-ru": "Офлайн-модель распознавания русской речи",
-                "sherpa-en": "Офлайн-модель распознавания английской речи",
-                VAD_FILE: "Офлайн-модель поиска речи",
-                SPEAKER_FILE: "Офлайн-модель разделения по спикерам",
+                "sherpa-ru": "Офлайн-модель распознавания речи (русский)",
+                "sherpa-en": "Офлайн-модель распознавания речи (английский)",
+                VAD_FILE: "Офлайн-модель поиска речи (Silero VAD)",
+                SPEAKER_FILE: "Офлайн-модель разделения по спикерам (wespeaker)",
             }.get(asset, asset)
             needs.append(label)
             need_mb += OFFLINE_SIZES_MB.get(asset, 100)
@@ -94,12 +100,19 @@ def setup_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     online, installed = check_ollama(t["url"])
     if not online:
         needs.append("Ollama не запущена: установите её с ollama.com и запустите (нужна для конспектов)")
-    elif not pick_installed_model(t["llm"], installed):
+    elif not _has_model(t["llm"], installed):
         source = " (из офлайн-пакета)" if _from_release(settings, t["llm"]) else " (скачивается из интернета)"
         needs.append(f"Языковая модель Ollama «{t['llm']}»{source}")
         need_mb += LLM_SIZES_MB.get(t["llm"], 4700)
 
     return {"ready": not needs, "needs": needs, "need_mb": need_mb}
+
+
+def _has_model(wanted: str, installed: List[str]) -> bool:
+    """Точное совпадение: запасная подстановка другой модели здесь не годится,
+    иначе при установленной 7B «установка» 3B считалась бы уже выполненной."""
+    names = set(installed)
+    return wanted in names or f"{wanted}:latest" in names
 
 
 def _from_release(settings: Dict[str, Any], llm: str) -> bool:
@@ -111,6 +124,8 @@ def _check_cancel(cancel_cb: Optional[CancelCb]) -> None:
     if cancel_cb and cancel_cb():
         raise CancelledError()
 
+
+# ----------------------------- Whisper / Ollama -----------------------------
 
 def _download_whisper(name: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
     try:
@@ -153,7 +168,7 @@ def _pull_ollama(url: str, model: str, progress_cb: ProgressCb, cancel_cb: Cance
         raise SetupError(f"Не удалось скачать модель {model} через Ollama: {err}") from err
 
 
-# Офлайн
+# ----------------------------- Офлайн-пакет -----------------------------
 
 def _sha256(path: str) -> str:
     h = hashlib.sha256()
@@ -163,13 +178,44 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _pack_dirs() -> List[str]:
+    """Папки, где может лежать локальный комплект (файлы релиза, скопированные заранее):
+    переменная AXAI_PACK, затем `models_pack` рядом с приложением, рядом с его папкой и рядом с хранилищем."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = [
+        os.environ.get("AXAI_PACK", ""),
+        os.path.join(os.path.dirname(sys.executable), "models_pack") if getattr(sys, "frozen", False) else "",
+        os.path.join(here, "models_pack"),
+        os.path.join(os.path.dirname(here), "models_pack"),
+        os.path.join(os.path.dirname(MODELS_DIR), "models_pack"),
+    ]
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
+def _local_file(name: str) -> Optional[str]:
+    for d in _pack_dirs():
+        path = os.path.join(d, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _fetch_sums() -> Dict[str, str]:
-    """Читает SHA256SUMS из релиза. Ключи — путь из файла без ведущих «./» и «models/»."""
+    """Контрольные суммы: из локального комплекта, а если его нет — из релиза.
+    Ключи — путь из файла без ведущих «./» и «models/»."""
+    local = _local_file("SHA256SUMS")
+    if local:
+        with open(local, "r", encoding="utf-8", errors="replace") as f:
+            return _parse_sums(f.read())
     try:
         with urllib.request.urlopen(f"{RELEASE_URL}/SHA256SUMS", timeout=30) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except Exception as err:
         raise SetupError(f"Не удалось получить список контрольных сумм ({RELEASE_URL}): {err}") from err
+    return _parse_sums(text)
+
+
+def _parse_sums(text: str) -> Dict[str, str]:
     sums: Dict[str, str] = {}
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
@@ -207,9 +253,16 @@ def _download_file(url: str, dest: str, label: str, lo: int, hi: int, progress_c
 def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: CancelCb) -> List[str]:
     assets = _offline_assets(missing)
     progress_cb(2, "Получение контрольных сумм...")
-    sums = _fetch_sums()
+    try:
+        sums = _fetch_sums()
+    except SetupError:
+        # без интернета можно обойтись, если все файлы лежат в локальном комплекте
+        if not all(_local_file(f"{a}.zip" if not a.endswith(".onnx") else a) for a in assets):
+            raise
+        sums = {}
     installed: List[str] = []
     os.makedirs(MODELS_DIR, exist_ok=True)
+
     weights = {a: OFFLINE_SIZES_MB.get(a, 50) for a in assets}
     total_w = sum(weights.values()) or 1
     cursor = 3
@@ -219,11 +272,17 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
         cursor = hi
         is_zip = not asset.endswith(".onnx")
         file_name = f"{asset}.zip" if is_zip else asset
+
         tmp_dir = tempfile.mkdtemp(prefix="axai_dl_", dir=MODELS_DIR)
         try:
             part = os.path.join(tmp_dir, file_name)
             dl_hi = lo + int((hi - lo) * 0.85)
-            _download_file(f"{RELEASE_URL}/{file_name}", part, file_name, lo, dl_hi, progress_cb, cancel_cb)
+            local = _local_file(file_name)
+            if local:
+                part = local  # файл из локального комплекта: интернет не нужен, исходный файл не трогаем
+                progress_cb(lo, f"Найден локальный файл {file_name}")
+            else:
+                _download_file(f"{RELEASE_URL}/{file_name}", part, file_name, lo, dl_hi, progress_cb, cancel_cb)
 
             progress_cb(dl_hi, f"Проверка {file_name}...")
             expected = sums.get(file_name)
@@ -251,13 +310,13 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
                 if os.path.isdir(target):
                     shutil.rmtree(target)
                 shutil.move(src, target)
-                for name in ASR_FILES:
+                for name in ASR_FILES:  # контрольные суммы распакованных файлов, если они есть в списке
                     exp = sums.get(f"{asset}/{name}")
                     if exp and _sha256(os.path.join(target, name)) != exp:
                         shutil.rmtree(target, ignore_errors=True)
                         raise SetupError(f"Файл {asset}/{name} повреждён (контрольная сумма не совпала).")
             else:
-                shutil.move(part, os.path.join(MODELS_DIR, file_name))
+                (shutil.copy2 if local else shutil.move)(part, os.path.join(MODELS_DIR, file_name))
             installed.append(asset)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -265,8 +324,14 @@ def _install_offline(missing: List[str], progress_cb: ProgressCb, cancel_cb: Can
 
 
 def _import_gguf(url: str, model: str, gguf_path: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
+    """Создаёт в Ollama модель `model` из локального файла GGUF.
+
+    Сначала пробуем команду `ollama create` (она работает во всех версиях), затем — HTTP API.
+    Шаблон ChatML и стоп-токены задаём явно: приложение шлёт «сырые» запросы в /api/generate.
+    """
     progress_cb(90, "Импорт модели в Ollama...")
     errors: List[str] = []
+
     exe = shutil.which("ollama")
     if exe:
         tmp = tempfile.mkdtemp(prefix="axai_modelfile_", dir=MODELS_DIR)
@@ -327,6 +392,7 @@ def _import_gguf(url: str, model: str, gguf_path: str, progress_cb: ProgressCb, 
 
 
 def _install_bundled_llm(url: str, model: str, progress_cb: ProgressCb, cancel_cb: CancelCb) -> None:
+    """Скачивает GGUF из релиза, проверяет SHA256 (если сумма есть) и импортирует в Ollama."""
     try:
         sums = _fetch_sums()
     except SetupError:
@@ -334,16 +400,22 @@ def _install_bundled_llm(url: str, model: str, progress_cb: ProgressCb, cancel_c
     os.makedirs(MODELS_DIR, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="axai_dl_", dir=MODELS_DIR)
     try:
-        part = os.path.join(tmp, BUNDLED_LLM_FILE)
-        _download_file(f"{RELEASE_URL}/{BUNDLED_LLM_FILE}", part, BUNDLED_LLM_FILE, 3, 85, progress_cb, cancel_cb)
+        part = _local_file(BUNDLED_LLM_FILE)  # из локального комплекта, если он есть
+        if part:
+            progress_cb(5, f"Найден локальный файл {BUNDLED_LLM_FILE}")
+        else:
+            part = os.path.join(tmp, BUNDLED_LLM_FILE)
+            _download_file(f"{RELEASE_URL}/{BUNDLED_LLM_FILE}", part, BUNDLED_LLM_FILE, 3, 85, progress_cb, cancel_cb)
         progress_cb(86, "Проверка файла модели...")
         expected = sums.get(BUNDLED_LLM_FILE)
         if expected and _sha256(part) != expected:
             raise SetupError("Контрольная сумма файла модели не совпала — файл повреждён. Повторите установку.")
         _import_gguf(url, model, part, progress_cb, cancel_cb)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)  # Ollama уже скопировал модель к себе, файл больше не нужен
 
+
+# ----------------------------- Точка входа -----------------------------
 
 def run_setup(settings: Dict[str, Any], progress_cb: ProgressCb, cancel_cb: CancelCb) -> str:
     t = _targets(settings)
@@ -362,8 +434,10 @@ def run_setup(settings: Dict[str, Any], progress_cb: ProgressCb, cancel_cb: Canc
     _check_cancel(cancel_cb)
     online, installed = check_ollama(t["url"])
     if not online:
-        notes.append("Ollama не запущена — установите её с ollama.com, запустите и повторите установку (нужна для конспектов).")
-    elif not pick_installed_model(t["llm"], installed):
+        setup_exe = _local_file("OllamaSetup.exe")
+        where = f"установщик лежит здесь: {setup_exe}" if setup_exe else "скачайте её с ollama.com"
+        notes.append(f"Ollama не запущена — {where}, запустите её и повторите установку (нужна для конспектов).")
+    elif not _has_model(t["llm"], installed):
         if _from_release(settings, t["llm"]):
             _install_bundled_llm(t["url"], t["llm"], progress_cb, cancel_cb)
         else:
