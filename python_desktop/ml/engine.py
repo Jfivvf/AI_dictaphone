@@ -6,6 +6,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
 from audio_decode import decode_audio_16k
 from paths import MODELS_DIR
 from export.exporters import repair_corrupted_latex
@@ -13,14 +14,17 @@ from export.exporters import repair_corrupted_latex
 ProgressCallback = Callable[[int, str], None]
 CancelCallback = Callable[[], bool]
 
+
 class AiUnavailableError(RuntimeError):
     pass
+
 
 class NotEnoughTextError(RuntimeError):
     pass
 
 
 MIN_TRANSCRIPT_CHARS = 300
+
 
 class CancelledError(Exception):
     pass
@@ -32,6 +36,7 @@ class LectureContext:
     title: str = ""
     lecturer: str = ""
     notes: str = ""
+
     def for_prompt(self) -> str:
         lines: List[str] = []
         if self.subject.strip():
@@ -42,8 +47,11 @@ class LectureContext:
             lines.append(f"Лектор: {self.lecturer.strip()}")
         if self.notes.strip():
             lines.append(
-                "Контекст и термины от студента (пиши термины, фамилии и обозначения "
-                "именно так, как здесь):\n" + self.notes.strip()[:4000]
+                "Справочник терминов, фамилий и обозначений от студента. Распознавание речи "
+                "часто искажает такие слова: если в материале есть слово, похожее на одно из них "
+                "по звучанию, пиши его так, как в справочнике. Очевидные опечатки в самом справочнике "
+                "можно исправить. Обозначения, которых нет ни в справочнике, ни в материале, "
+                "не придумывай:\n" + self.notes.strip()[:4000]
             )
         return "\n".join(lines)
 
@@ -69,6 +77,7 @@ def extract_terms(notes: str, limit: int = 25) -> List[str]:
 
 
 def build_asr_prompts(ctx: LectureContext) -> Tuple[str, str]:
+    """Возвращает (initial_prompt, hotwords) для faster-whisper."""
     head = ". ".join(p.strip() for p in (ctx.subject, ctx.title) if p.strip())
     notes = re.sub(r"\s+", " ", ctx.notes or "").strip()
     initial = " ".join(p for p in (head + "." if head else "", notes) if p)[:600]
@@ -543,9 +552,11 @@ class LocalLlmSummarizer(BaseSummarizer):
         num_ctx: int = 16384,
         read_timeout: int = 600,
         detail: str = "fast",
+        requested_model: str = "",
     ):
         self.detail = self.DETAIL.get(detail, self.DETAIL["fast"])
         self.model_name = model_name
+        self.requested_model = requested_model or model_name
         self.ollama_url = ollama_url.rstrip("/")
         self.num_ctx = num_ctx
         self.read_timeout = read_timeout
@@ -597,6 +608,13 @@ class LocalLlmSummarizer(BaseSummarizer):
                 if chunk.get("done"):
                     break
         return "".join(parts).strip()
+
+    @property
+    def label(self) -> str:
+        """Название модели для сообщений; если вместо выбранной взята другая, это видно."""
+        if self.requested_model and self.requested_model != self.model_name:
+            return f"{self.model_name} вместо {self.requested_model}: её нет в Ollama"
+        return self.model_name
 
     @staticmethod
     def _report(cb: Optional[ProgressCallback], pct: int, msg: str) -> None:
@@ -651,7 +669,7 @@ class LocalLlmSummarizer(BaseSummarizer):
                 self._report(
                     progress_cb,
                     62 + int((idx + 1) / len(chunks) * 18),
-                    f"Локальная LLM ({self.model_name}): блок {idx + 1} из {len(chunks)}...",
+                    f"Локальная LLM ({self.label}): блок {idx + 1} из {len(chunks)}...",
                 )
                 raw = self._call(
                     f"{header}\n\nИзвлеки из фрагмента лекции определения, ключевые мысли, формулы LaTeX "
@@ -669,7 +687,7 @@ class LocalLlmSummarizer(BaseSummarizer):
             source = self._fit_notes(notes, ctx, progress_cb, cancel_cb)
             task_source = "\n".join(task_notes)
 
-        self._report(progress_cb, 84, f"Локальная LLM ({self.model_name}): сборка конспекта...")
+        self._report(progress_cb, 84, f"Локальная LLM ({self.label}): сборка конспекта...")
         summary_md = self._call(
             f"{header}\n\nНа основе материала составь университетский конспект в Markdown "
             f"с формулами LaTeX ($...$ и $$...$$). {self.detail['reduce_hint']}\n{self.STRICT_RULES}\n"
@@ -710,7 +728,7 @@ class LocalLlmSummarizer(BaseSummarizer):
             self._report(
                 progress_cb,
                 12 + int(idx / len(sections) * 82),
-                f"Локальная LLM ({self.model_name}): раздел {idx + 1} из {len(sections)}...",
+                f"Локальная LLM ({self.label}): раздел {idx + 1} из {len(sections)}...",
             )
             excerpt = relevant_excerpt(transcript_text, section, 6000)
             piece = self._call(
@@ -770,4 +788,5 @@ def create_summarizer(settings: Dict[str, Any]) -> BaseSummarizer:
         num_ctx=int(settings.get("ollama_num_ctx", 16384)),
         read_timeout=int(settings.get("ollama_timeout", 600)),
         detail=settings.get("summary_detail", "fast"),
+        requested_model=wanted,
     )
