@@ -97,8 +97,55 @@ def _build_vad(sherpa):
     return sherpa.VoiceActivityDetector(cfg, buffer_size_in_seconds=60)
 
 
+# Метаданные, без которых sherpa-onnx не принимает модель wespeaker (иначе пишет
+# «No model_type in the metadata» и аварийно закрывает всё приложение).
+_WESPEAKER_META = {
+    "framework": "wespeaker",
+    "language": "English",
+    "comment": "WeSpeaker ResNet34",
+    "sample_rate": "16000",
+    "output_dim": "256",
+    "normalize_samples": "0",
+}
+
+
+def _varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def _meta_entry(key: str, value: str) -> bytes:
+    k, v = key.encode("utf-8"), value.encode("utf-8")
+    inner = b"\x0a" + _varint(len(k)) + k + b"\x12" + _varint(len(v)) + v
+    return b"\x72" + _varint(len(inner)) + inner  # ModelProto.metadata_props (поле 14)
+
+
+def ensure_wespeaker_metadata(path: str) -> bool:
+    """Дописывает в конец .onnx недостающие метаданные (формат protobuf это допускает:
+    повторяющиеся поля просто дополняют друг друга). Возвращает True, если файл изменён."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if b"normalize_samples" in data and b"wespeaker" in data:
+        return False
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+        for key, value in _WESPEAKER_META.items():
+            f.write(_meta_entry(key, value))
+    os.replace(tmp, path)
+    return True
+
+
 def _build_extractor(sherpa, threads: int):
     if threads not in _EXTRACTORS:
+        ensure_wespeaker_metadata(os.path.join(MODELS_DIR, SPEAKER_FILE))
         cfg = sherpa.SpeakerEmbeddingExtractorConfig(
             model=os.path.join(MODELS_DIR, SPEAKER_FILE), num_threads=threads, debug=False, provider="cpu",
         )
@@ -116,6 +163,8 @@ def _embedding(extractor, samples: np.ndarray) -> np.ndarray:
 
 
 def assign_speakers(embeddings: List[Optional[np.ndarray]], threshold: float, max_speakers: int) -> List[int]:
+    """Жадная кластеризация по косинусной близости к центроидам. Сегменты без эмбеддинга
+    (слишком короткие) наследуют говорящего предыдущего сегмента."""
     centroids: List[np.ndarray] = []
     counts: List[int] = []
     labels: List[int] = []
