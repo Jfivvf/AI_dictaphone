@@ -1,15 +1,9 @@
-"""
-Запуск:
-    cd python_desktop
-    python main.py
-"""
 import os
 import re
 import shutil
 import sys
 import json
 from datetime import datetime
-
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QPixmap
 from PySide6.QtWidgets import (
@@ -30,6 +24,7 @@ from export.exporters import (
     repair_corrupted_latex, unpack_raw_json_lecture_if_needed,
 )
 from ml.engine import HardwareInspector
+from ui.transcript_panel import TranscriptPanel
 from ml.offline import offline_missing
 from model_setup import is_offline_mode, setup_status
 from ui.icons import make_icon
@@ -802,11 +797,10 @@ class AxAIDesktopApp(QMainWindow):
         self.latex_preview.set_dark_mode(self.is_dark)
         self.latex_preview.pdf_exporter.finished.connect(self.on_pdf_exported)
         self.text_editor = QTextEdit()
-        self.transcript_viewer = QTextEdit()
-        self.transcript_viewer.setReadOnly(True)
+        self.transcript_panel = TranscriptPanel(self)
         self.viewer_stack.addWidget(self.latex_preview)
         self.viewer_stack.addWidget(self.text_editor)
-        self.viewer_stack.addWidget(self.transcript_viewer)
+        self.viewer_stack.addWidget(self.transcript_panel)
         layout.addWidget(self.viewer_stack, stretch=1)
         return page
 
@@ -863,7 +857,7 @@ class AxAIDesktopApp(QMainWindow):
         self._set_viewer_meta(lec, clean_text)
         self.text_editor.setPlainText(clean_text)
         self.viewer_context_input.setPlainText(lec.get("ai_context", ""))
-        self.transcript_viewer.setPlainText(self._build_transcript_text(lec))
+        self.transcript_panel.set_lecture(lec, self.bookmark_repo.get_for_lecture(lec["id"]), self.is_dark)
 
         self.latex_preview.render_lecture(self.current_lecture)
         self.viewer_stack.setCurrentIndex(0)
@@ -1875,6 +1869,7 @@ class AxAIDesktopApp(QMainWindow):
         worker.start()
 
     def closeEvent(self, event):
+        self.transcript_panel.stop()
         if self.is_recording:
             self.recorder.stop()
         for worker in (self.worker, self.expand_worker, self.import_worker, self.setup_worker):
@@ -1884,7 +1879,28 @@ class AxAIDesktopApp(QMainWindow):
         super().closeEvent(event)
 
 
+def install_crash_log() -> None:
+    """Пишет аварии в ~/AxAI_Storage/crash.log: и ошибки Python, и вылеты из нативного кода."""
+    try:
+        import faulthandler
+        import traceback
+        from paths import STORAGE_DIR
+
+        log_file = open(os.path.join(STORAGE_DIR, "crash.log"), "a", encoding="utf-8", buffering=1)
+        log_file.write(f"\n=== запуск {datetime.now():%Y-%m-%d %H:%M:%S} ===\n")
+        faulthandler.enable(file=log_file, all_threads=True)
+
+        def hook(exc_type, exc, tb):
+            log_file.write("".join(traceback.format_exception(exc_type, exc, tb)))
+            sys.__excepthook__(exc_type, exc, tb) if sys.__stderr__ else None
+
+        sys.excepthook = hook
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    install_crash_log()
     app = QApplication(sys.argv)
     app.setApplicationName("AxAI")
     app.setWindowIcon(QIcon(app_icon_pixmap(256)))
